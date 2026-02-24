@@ -25,6 +25,7 @@ def plot_family_summary(env, physics, receptor_indices, info_loss, n_samples=200
     
     # Generate a color palette for the receptors
     colors = plt.cm.viridis(np.linspace(0, 0.9, N_Receptors))
+    figs,axes = list(),list() # store the figures, and axes generated
     
     for f_idx in range(n_families):
         # =====================================================================
@@ -112,7 +113,7 @@ def plot_family_summary(env, physics, receptor_indices, info_loss, n_samples=200
         ax_bottom.fill_between(c_sweep_np, c_pdf_np, color='gray', alpha=0.4)
         ax_bottom.plot(c_sweep_np, c_pdf_np, color='black', lw=1)
         ax_bottom.set_xlabel("Concentration (M)", fontsize=9)
-        ax_bottom.set_ylabel("Density", fontsize=9)
+        ax_bottom.set_ylabel("p(c)", fontsize=9)
         ax_bottom.set_yticks([]) # Hide y-ticks on density
         ax_bottom.tick_params(direction='in')
         
@@ -123,8 +124,10 @@ def plot_family_summary(env, physics, receptor_indices, info_loss, n_samples=200
                                    color=colors[r], alpha=0.2)
             ax_right.plot(activity_density_np[:, r], y_query_np, color=colors[r], lw=1.5)
             
-        ax_right.set_xlabel("Density", fontsize=9)
+        ax_right.set_xlabel(r"$p(a)$", fontsize=9)
         ax_right.tick_params(labelleft=False,direction='in') # Hide y-labels to share with main frame
         ax_right.set_xticks([]) # Hide x-ticks on density
         
-        plt.show()
+        figs.append(fig)
+        axes.append((ax_main,ax_bottom,ax_right))
+    return figs, axes

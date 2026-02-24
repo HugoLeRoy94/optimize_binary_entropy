@@ -15,44 +15,69 @@ class Receptor(nn.Module):
         self.n_units = n_units
         self.k_sub = k_sub
     
-    def p_open(self,c_reshaped:torch.Tensor,E_open: torch.Tensor,E_closed: torch.Tensor):
-        """
-        Args:
-            c_reshaped: (batch, 1,1)
-            E_open: (batch, R, k_unit)
-            E_closed: (batch, R, k_unit)
-        """
-        
-        # Numerator: Product( c / Ko_tilde ) = Product( c * exp(-E_open) )
-        term_open_per_unit = c_reshaped * torch.exp(-E_open)
-        term_open = torch.prod(term_open_per_unit, dim=-1) # (Batch, R)
-        
-        # Denominator Term 2: Product( 1 + c / Kc ) = Product( 1 + c * exp(-E_closed) )
-        term_closed_per_unit = 1.0 + c_reshaped * torch.exp(-E_closed)
-        term_closed = torch.prod(term_closed_per_unit, dim=-1) # (Batch, R)
-        
-        # Raw probability
-        p_c = term_open / (term_open + term_closed)
+    #def p_open(self,c_reshaped:torch.Tensor,E_open: torch.Tensor,E_closed: torch.Tensor):
+    #    """
+    #    Args:
+    #        c_reshaped: (batch, 1,1)
+    #        E_open: (batch, R, k_unit)
+    #        E_closed: (batch, R, k_unit)
+    #    """
+    #    
+    #    # Numerator: Product( c / Ko_tilde ) = Product( c * exp(-E_open) )
+    #    term_open_per_unit = c_reshaped * torch.exp(-E_open)
+    #    term_open = torch.prod(term_open_per_unit, dim=-1) # (Batch, R)
+    #    
+    #    # Denominator Term 2: Product( 1 + c / Kc ) = Product( 1 + c * exp(-E_closed) )
+    #    term_closed_per_unit = 1.0 + c_reshaped * torch.exp(-E_closed)
+    #    term_closed = torch.prod(term_closed_per_unit, dim=-1) # (Batch, R)
+    #    
+    #    # Raw probability
+    #    p_c = term_open / (term_open + term_closed)
+#
+    #    # ----------------------------------------------------------------------
+    #    # RENORMALIZE
+    #    # ----------------------------------------------------------------------
+    #    # With the simplified model, p_min (at c=0) is exactly 0.0
+    #    # We only need to calculate p_max (as c -> infinity)
+    #    
+    #    # As c -> inf, term_open ~ c^k * exp(-Sum(E_open))
+    #    # As c -> inf, term_closed ~ c^k * exp(-Sum(E_closed))
+    #    # p_max = exp(-Sum(E_open)) / [exp(-Sum(E_open)) + exp(-Sum(E_closed))]
+    #    # Divided by exp(-Sum(E_open)):
+    #    # p_max = 1 / [1 + exp( Sum(E_open) - Sum(E_closed) )]
+    #    
+    #    delta_E_sum = torch.sum(E_open - E_closed, dim=-1) # (Batch, R)
+    #    p_max = 1.0 / (1.0 + torch.exp(delta_E_sum))
+    #    
+    #    # Normalize (p_min is 0, so it's just p_c / p_max)
+    #    # Add epsilon to denominator to prevent division by zero if p_max is effectively 0
+    #    normalized = p_c / (p_max + 1e-8)
+    #    return normalized
 
-        # ----------------------------------------------------------------------
-        # RENORMALIZE
-        # ----------------------------------------------------------------------
-        # With the simplified model, p_min (at c=0) is exactly 0.0
-        # We only need to calculate p_max (as c -> infinity)
-        
-        # As c -> inf, term_open ~ c^k * exp(-Sum(E_open))
-        # As c -> inf, term_closed ~ c^k * exp(-Sum(E_closed))
-        # p_max = exp(-Sum(E_open)) / [exp(-Sum(E_open)) + exp(-Sum(E_closed))]
-        # Divided by exp(-Sum(E_open)):
-        # p_max = 1 / [1 + exp( Sum(E_open) - Sum(E_closed) )]
-        
-        delta_E_sum = torch.sum(E_open - E_closed, dim=-1) # (Batch, R)
-        p_max = 1.0 / (1.0 + torch.exp(delta_E_sum))
-        
-        # Normalize (p_min is 0, so it's just p_c / p_max)
-        # Add epsilon to denominator to prevent division by zero if p_max is effectively 0
-        normalized = p_c / (p_max + 1e-8)
-        return normalized
+    def p_open(self, c_reshaped: torch.Tensor, E_open: torch.Tensor, E_closed: torch.Tensor):
+            """
+            Numerically stable MWC calculation using log-space formulation.
+            """
+            # 1. Safe log concentration
+            ln_c = torch.log(c_reshaped + 1e-12) # Add epsilon to prevent log(0)
+            
+            # 2. Log-Weight of the Open State
+            # ln(c * exp(-E_o)) = ln(c) - E_o
+            log_w_open_per_unit = ln_c - E_open
+            ln_W_open = torch.sum(log_w_open_per_unit, dim=-1) # (Batch, R)
+            
+            # 3. Log-Weight of the Closed State
+            # ln(1 + c * exp(-E_c)) is mathematically identical to softplus(ln(c) - E_c)
+            # softplus(x) = ln(1 + exp(x)). It is highly optimized and overflow-safe!
+            log_w_closed_per_unit = torch.nn.functional.softplus(ln_c - E_closed)
+            ln_W_closed = torch.sum(log_w_closed_per_unit, dim=-1) # (Batch, R)
+            
+            # 4. Final Probability
+            # p_o = exp(ln_W_open) / (exp(ln_W_open) + exp(ln_W_closed))
+            # This simplifies exactly to sigmoid(ln_W_open - ln_W_closed)
+            p_o = torch.sigmoid(ln_W_open - ln_W_closed)
+            
+            return p_o
 
     def forward(self, 
                 energies: torch.Tensor, 
