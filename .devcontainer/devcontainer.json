@@ -11,5 +11,8 @@
             ]
         }
     },
-    "remoteUser": "root"
+    "remoteUser": "root",
+    "updateRemoteUserUID": true,
+    "containerUser": "root",
+    "postCreateCommand": "chown -R $(id -u):$(id -g) /app/unit_test /app/data /app/run"
 }

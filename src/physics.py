@@ -14,46 +14,6 @@ class Receptor(nn.Module):
         super().__init__()
         self.n_units = n_units
         self.k_sub = k_sub
-    
-    #def p_open(self,c_reshaped:torch.Tensor,E_open: torch.Tensor,E_closed: torch.Tensor):
-    #    """
-    #    Args:
-    #        c_reshaped: (batch, 1,1)
-    #        E_open: (batch, R, k_unit)
-    #        E_closed: (batch, R, k_unit)
-    #    """
-    #    
-    #    # Numerator: Product( c / Ko_tilde ) = Product( c * exp(-E_open) )
-    #    term_open_per_unit = c_reshaped * torch.exp(-E_open)
-    #    term_open = torch.prod(term_open_per_unit, dim=-1) # (Batch, R)
-    #    
-    #    # Denominator Term 2: Product( 1 + c / Kc ) = Product( 1 + c * exp(-E_closed) )
-    #    term_closed_per_unit = 1.0 + c_reshaped * torch.exp(-E_closed)
-    #    term_closed = torch.prod(term_closed_per_unit, dim=-1) # (Batch, R)
-    #    
-    #    # Raw probability
-    #    p_c = term_open / (term_open + term_closed)
-#
-    #    # ----------------------------------------------------------------------
-    #    # RENORMALIZE
-    #    # ----------------------------------------------------------------------
-    #    # With the simplified model, p_min (at c=0) is exactly 0.0
-    #    # We only need to calculate p_max (as c -> infinity)
-    #    
-    #    # As c -> inf, term_open ~ c^k * exp(-Sum(E_open))
-    #    # As c -> inf, term_closed ~ c^k * exp(-Sum(E_closed))
-    #    # p_max = exp(-Sum(E_open)) / [exp(-Sum(E_open)) + exp(-Sum(E_closed))]
-    #    # Divided by exp(-Sum(E_open)):
-    #    # p_max = 1 / [1 + exp( Sum(E_open) - Sum(E_closed) )]
-    #    
-    #    delta_E_sum = torch.sum(E_open - E_closed, dim=-1) # (Batch, R)
-    #    p_max = 1.0 / (1.0 + torch.exp(delta_E_sum))
-    #    
-    #    # Normalize (p_min is 0, so it's just p_c / p_max)
-    #    # Add epsilon to denominator to prevent division by zero if p_max is effectively 0
-    #    normalized = p_c / (p_max + 1e-8)
-    #    return normalized
-
     def p_open(self, c_reshaped: torch.Tensor, E_open: torch.Tensor, E_closed: torch.Tensor):
             """
             Numerically stable MWC calculation using log-space formulation.
@@ -112,39 +72,32 @@ class Receptor(nn.Module):
         # B. COMPUTE ACTIVITY (Simplified MWC)
         # ----------------------------------------------------------------------
 
-        p_o = self.p_open(concentrations.view(batch_size, 1, 1),E_open,E_closed)
+        p_o = self.p_open(concentrations.view(batch_size, 1, 1),E_open,E_closed)        
         
         return torch.clamp(p_o, 0.0, 1.0)
 
     @torch.no_grad()
-    def get_dose_response(self, c_sweep, env, receptor_index, family_id, n_points=100):
+    def get_dose_response(self, env, receptor_indices, family_id, n_points=200,method = 'absolute'):
         device = env.interaction_mu.device
+        N_Receptors = receptor_indices.shape[0]
         
-        # We want a log-uniform sweep to make the sigmoid look pretty
-        # Let's get the center in natural log space
-        d = env.concentration_model.get_distribution(family_id)
-        ln_x = torch.linspace(d.mean - 3*d.stddev, d.mean + 3*d.stddev, n_points,device = env.interaction_mu.device)
-                
-        c_sweep = 10**ln_x
-        
+        # 1. Ask environment for the physical concentration sweep
+        c_sweep, _ = env.get_concentration_sweep(family_id, n_points)
 
         # 2. Get the MEAN interaction energies for this family
-        # interaction_mu shape: (n_units, n_families, 2)
-        # We take the mean (mu) rather than sampling to get the "characteristic" curve
-        mu_family = env.interaction_mu[:, family_id, :] # (n_units, 2)
-        
-        # Gather energies for the specific stoichiometry
-        # mu_receptor shape: (k_sub, 2)
-        mu_receptor = mu_family[receptor_index]
+        mu_family = env.interaction_mu[:, family_id, :] 
+        mu_receptor = mu_family[receptor_indices]
 
-        # Prepare for p_open: needs (Batch, R, k, 2)
-        # We treat n_points as the batch dimension
-        E_open = mu_receptor[:, 0].expand(n_points, 1, self.k_sub)
-        E_closed = mu_receptor[:, 1].expand(n_points, 1, self.k_sub)
-        # 3. Compute activity
-        # p_open expects c_reshaped: (Batch, 1, 1)
-        c_reshaped = c_sweep.view(n_points, 1, 1)
-        p_o = self.p_open(c_reshaped, E_open, E_closed) # (n_points, 1)
+        # Prepare for p_open: needs (Batch, R, k_sub)
+        E_open = mu_receptor[..., 0].unsqueeze(0).expand(n_points, N_Receptors, self.k_sub)
+        E_closed = mu_receptor[..., 1].unsqueeze(0).expand(n_points, N_Receptors, self.k_sub)
         
-        # Return physical concentrations and activities
+        # 3. Compute activity
+        c_reshaped = c_sweep.view(n_points, 1, 1)
+        p_o = self.p_open(c_reshaped, E_open, E_closed) 
+        if method == "self_normalized":
+            # Divide by the maximum value observed in this specific batch/sweep
+            p_max = torch.max(p_o, dim=0, keepdim=True).values
+            p_o =  p_o / (p_max + 1e-8) # Avoid division by zero
+        
         return c_sweep.cpu().numpy(), p_o.cpu().numpy()

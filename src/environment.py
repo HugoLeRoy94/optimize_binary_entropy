@@ -28,6 +28,14 @@ class ConcentrationModel(nn.Module, ABC):
     def get_distribution(self, family_id: int) -> dist.Distribution:
         """Returns the torch distribution object for a specific family."""
         pass
+    @abstractmethod
+    def get_sweep_and_pdf(self, family_id: int, n_points: int = 200) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Returns the physical concentration sweep and its PDF."""
+        pass
+    @abstractmethod
+    def get_entropy(self):
+        """ return the entropy of the concentration distribution"""
+        pass
 
 class LogNormalConcentration(ConcentrationModel):
     """
@@ -57,11 +65,50 @@ class LogNormalConcentration(ConcentrationModel):
     def get_expected_log_c(self):
         # mu is log10(c). To get natural log ln(c): ln(c) = log10(c) * ln(10)
         return self.mu * math.log(10.0)
+    
+    def get_entropy(self):
+        """
+            return the entropy of the log normal distribution:
+            $ \log_2(\sqrt(2\pi e)\sigma e^\mu)$
+        """
+        return torch.log2(torch.sqrt(2*torch.pi*torch.exp(1))*torch.exp(self.log_sigma +self.mu))
+    def get_entropy_linear(self):
+        """
+        Entropy of the base-10 Log-Normal distribution.
+
+        """
+        # 1. Entropy of the underlying Normal distribution (log10 space) in bits
+        sigma = torch.exp(self.log_sigma)
+        h_normal = torch.log2(sigma * math.sqrt(2 * math.pi * math.e))
+        
+        # 2. Add the Jacobian contribution for the 10^x transformation
+        # E[ln(c)] = mu * ln(10)
+        jacobian_term = (self.mu * math.log(10.0) + math.log(math.log(10.0))) / math.log(2.0)
+        
+        return h_normal + jacobian_term
+    def get_entropy_log(self):
+        """
+        Entropy of a Normal distribution in bits.
+        """
+        sigma = torch.exp(self.log_sigma)
+        return torch.log2(sigma * math.sqrt(2 * math.pi * math.e))
+
+    @torch.no_grad()
     def get_distribution(self, family_id: int):
         mu = self.mu[family_id]
         sigma = torch.exp(self.log_sigma[family_id])
         return dist.Normal(mu, sigma) # Distribution of log10(c)
         
+    @torch.no_grad()
+    def get_sweep_and_pdf(self, family_id: int, n_points: int = 200):
+        d = self.get_distribution(family_id)
+        # Sweep in log10 space
+        x_log10 = torch.linspace(d.mean - 3*d.stddev, d.mean + 3*d.stddev, n_points, device=self.mu.device)
+        pdf = torch.exp(d.log_prob(x_log10))
+        # Convert to physical concentration (Molar)
+        c_sweep = 10.0 ** x_log10
+        return c_sweep, pdf
+
 class NormalConcentration(ConcentrationModel):
     """
     Simple Gaussian assumption.
@@ -84,10 +131,27 @@ class NormalConcentration(ConcentrationModel):
     def get_expected_log_c(self):
         # Approximate expected log(c) as log(mu)
         return torch.log(torch.clamp(self.mu, min=1e-12))
+    
+    def get_entropy(self):
+        """
+        Entropy of a Normal distribution in bits.
+        """
+        sigma = torch.exp(self.log_sigma)
+        return torch.log2(sigma * math.sqrt(2 * math.pi * math.e))
+
+    @torch.no_grad()
     def get_distribution(self, family_id: int):
         mu = self.mu[family_id]
         sigma = torch.exp(self.log_sigma[family_id])
         return dist.Normal(mu, sigma) # Distribution of c
+    
+    @torch.no_grad()
+    def get_sweep_and_pdf(self, family_id: int, n_points: int = 200):
+        d = self.get_distribution(family_id)
+        # Sweep already in linear physical space
+        c_sweep = torch.linspace(d.mean - 3*d.stddev, d.mean + 3*d.stddev, n_points, device=self.mu.device)
+        pdf = torch.exp(d.log_prob(c_sweep))
+        return c_sweep, pdf
 
 class LigandEnvironment(nn.Module):
     def __init__(self, n_units: int, n_families: int, conc_model: ConcentrationModel, sigma_init=1.0, delta_shift=4.0):
@@ -130,29 +194,36 @@ class LigandEnvironment(nn.Module):
         # 4. Initialize Standard Deviations
         # Initialize log_sigma to 0.0, meaning the standard deviations start exactly at 1.0
         self.interaction_log_sigma = nn.Parameter(torch.zeros(n_units, n_families, 2))
-
+    
     def sample_batch(self, batch_size: int):
+        """Used in training: Samples random families."""
         device = self.interaction_mu.device
-        
-        # A. Sample Family IDs
         family_ids = torch.randint(0, self.n_families, (batch_size,), device=device)
         
-        # B. Delegate Concentration Sampling
-        concentrations = self.concentration_model.sample(batch_size, family_ids)
+        energies, concentrations = self._sample_from_ids(batch_size, family_ids)
+        return energies, concentrations, family_ids
+
+    def sample_specific_family(self, batch_size: int, family_id: int):
+        """Samples ligands and energies for one specific family only."""
+        device = self.interaction_mu.device
+        f_ids = torch.full((batch_size,), family_id, dtype=torch.long, device=device)
         
-        # C. Sample Energies (Standard Reparameterization)
+        # Now we can reuse the logic we already wrote!
+        return self._sample_from_ids(batch_size, f_ids)
+
+    def _sample_from_ids(self, batch_size, family_ids):
+        """Internal helper to avoid code duplication between sample_batch and specific sampling."""
+        concs = self.concentration_model.sample(batch_size, family_ids)
+        
         mu_T = self.interaction_mu.permute(1, 0, 2)
         sigma_T = torch.exp(self.interaction_log_sigma.permute(1, 0, 2))
         
-        batch_mus = mu_T[family_ids]
-        batch_sigmas = sigma_T[family_ids]
+        energies = torch.distributions.Normal(
+            mu_T[family_ids], 
+            sigma_T[family_ids]
+        ).rsample()
         
-        # energies[:,:,0] = E_open
-        # energies[:,:,1] = E_close
-        
-        energies = dist.Normal(batch_mus, batch_sigmas).rsample()
-        
-        return energies, concentrations, family_ids
+        return energies, concs
 
     @torch.no_grad()
     def get_distribution(self, family_id=None, n_points=200):
@@ -160,3 +231,8 @@ class LigandEnvironment(nn.Module):
         x = torch.linspace(d.mean - 3*d.stddev, d.mean + 3*d.stddev, n_points,device = self.interaction_mu.device)
         pdf = torch.exp(d.log_prob(x))
         return x.cpu().numpy(),pdf.cpu().numpy()
+
+    @torch.no_grad()
+    def get_concentration_sweep(self, family_id: int, n_points: int = 200):
+        """Pass-through to get physical concentrations and pdf."""
+        return self.concentration_model.get_sweep_and_pdf(family_id, n_points)

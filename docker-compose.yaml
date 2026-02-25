@@ -1,7 +1,7 @@
 #docker-compose up
 services:
   jupyter-gpu:
-    build: .                          # Tells Docker to look for 'Dockerfile' in the current folder
+    build: .                          # Tells Docker to look for 'Dockerfile' 
     shm_size: '2gb' # use the host memory capacity
     container_name: pytorch_notebook
     ports:
