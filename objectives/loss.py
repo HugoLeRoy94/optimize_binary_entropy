@@ -102,11 +102,11 @@ class BaseInformationLoss(nn.Module, ABC):
         marginals = self.compute_kde_marginal_entropies(act, bandwidth_factor)
         
         # Use .item() to pull the scalars out to Python
-        return np.array([
-            joint_h.item(), 
-            marginals.sum().item(), 
-            (marginals.sum() - joint_h).item()
-        ])
+        return {
+            "full_array_entropy":joint_h.item(), 
+            "marginal_entropy":marginals.sum().item(), 
+            "total_correlation":(marginals.sum() - joint_h).item()
+        }
     
     @abstractmethod
     def forward(self, activity: torch.Tensor):

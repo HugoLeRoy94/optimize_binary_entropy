@@ -7,6 +7,9 @@ from .environment import (
     NormalConcentration
 )
 from .physics import Receptor
+from .geometry import generate_receptor_indices
+from .analysis_helper import plot_family_summary,evaluate_model
+from .IO import ExperimentLoader,ExperimentLogger
 
 # Exposing these allows for clean imports like:
 # from core import MWCReceptorLayer, NormalConcentration
@@ -15,5 +18,10 @@ __all__ = [
     "Receptor", 
     "ConcentrationModel", 
     "LogNormalConcentration", 
-    "NormalConcentration"
+    "NormalConcentration",
+    "generate_receptor_indices",
+    "plot_family_summary",
+    "ExperimentLogger",
+    "ExperimentLoader",
+    "evaluate_model"
 ]

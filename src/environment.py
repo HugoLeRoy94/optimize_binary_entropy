@@ -32,10 +32,6 @@ class ConcentrationModel(nn.Module, ABC):
     def get_sweep_and_pdf(self, family_id: int, n_points: int = 200) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns the physical concentration sweep and its PDF."""
         pass
-    @abstractmethod
-    def get_entropy(self):
-        """ return the entropy of the concentration distribution"""
-        pass
 
 class LogNormalConcentration(ConcentrationModel):
     """
@@ -66,12 +62,6 @@ class LogNormalConcentration(ConcentrationModel):
         # mu is log10(c). To get natural log ln(c): ln(c) = log10(c) * ln(10)
         return self.mu * math.log(10.0)
     
-    def get_entropy(self):
-        """
-            return the entropy of the log normal distribution:
-            $ \log_2(\sqrt(2\pi e)\sigma e^\mu)$
-        """
-        return torch.log2(torch.sqrt(2*torch.pi*torch.exp(1))*torch.exp(self.log_sigma +self.mu))
     def get_entropy_linear(self):
         """
         Entropy of the base-10 Log-Normal distribution.
@@ -86,6 +76,7 @@ class LogNormalConcentration(ConcentrationModel):
         jacobian_term = (self.mu * math.log(10.0) + math.log(math.log(10.0))) / math.log(2.0)
         
         return h_normal + jacobian_term
+    
     def get_entropy_log(self):
         """
         Entropy of a Normal distribution in bits.

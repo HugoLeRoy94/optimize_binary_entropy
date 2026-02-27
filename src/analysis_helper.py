@@ -221,5 +221,16 @@ def plot_family_summary(env, physics, receptor_indices, info_loss, n_samples=200
         
         figs.append(fig)
         axes.append((ax_main, ax_bottom, ax_right))
-        
     return figs, axes
+
+@torch.no_grad()
+def evaluate_model(env,physics,receptor_indices,loss_fn,n_samples=2000,k_knn = 5.):
+    device = env.interaction_mu.device
+    N_Receptors = receptor_indices.shape[0]
+    # draw random ligands
+    energies,concs,families = env.sample_batch(batch_size = n_samples)
+    # compute the activity array
+    activity = physics(energies, concs, receptor_indices)
+
+    return loss_fn.compute_knn_joint_entropy(activity,k = k_knn)
+
