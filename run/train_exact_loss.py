@@ -12,16 +12,22 @@ from src.physics import *
 from objectives.loss import ProxyInformationLoss,ExactInformationLoss
 from src.geometry import generate_receptor_indices
 from src.plot_helper import *
+from src.IO import ExperimentLogger
 
+# output class
+logger = ExperimentLogger(base_path="/app/data/",experiment_name="homo_2")
+checkpoints = False
 CONF = {
         "n_units": 2,
         "n_families": 2,
         "k_sub": 5,
         "batch_size": 512,
-        "epochs": 600,
+        "epochs": 1000,
         "lr": 0.05,
-        "cov_weight":10.
+        "k_knn":5,
+        "bandwidth_factor": 1.06
     }
+logger.save_config(CONF)
 
 # 1. SETUP
 # -----------------------------------------------------
@@ -34,7 +40,7 @@ conc_strategy = LogNormalConcentration(n_families=CONF['n_families'], init_mean=
 env = LigandEnvironment(CONF['n_units'], CONF['n_families'], conc_model=conc_strategy).to(device)
 
 physics = Receptor(CONF["n_units"], CONF["k_sub"]).to(device)
-loss_fn = ProxyInformationLoss(cov_weight=CONF['cov_weight']) # Default bandwidth
+loss_fn = ExactInformationLoss(k_knn=CONF['k_knn']) # Default bandwidth
 
 # Create the receptor identity: [[0, 0, 0, 0, 0]]
 #receptor_indices = torch.zeros(1, CONF["k_sub"], dtype=torch.long, device=device)
@@ -48,17 +54,17 @@ optimizer = optim.Adam(list(env.parameters()) + list(physics.parameters()), lr=C
 # 3. OPTIMIZATION LOOP
 # -----------------------------------------------------
 print(f"Training for {CONF['epochs']} epochs...")
-
-stats = []
+best_so_far = -float('inf')
+logger.save_checkpoint(0, env, physics, receptor_indices, is_best=False)
 for epoch in range(CONF['epochs']):
     optimizer.zero_grad()
     
     # A. Sample Batch
-    # energies: (B, 1, 2), concs: (B,)
+    # energies: (B, R, 2), concs: (B,)
     energies, concs, _ = env.sample_batch(CONF['batch_size'])
     
     # B. Physics
-    # activity: (B, 1)
+    # activity: (B, R)
     activity = physics(energies, concs, receptor_indices)
     
 
@@ -69,11 +75,18 @@ for epoch in range(CONF['epochs']):
     optimizer.step()
     
     
-    if epoch % 100 == 0:
-        stats.append(loss_fn.make_stats(activity))
-stats = np.array(stats)
-stats = {
-            "full_array_entropy":stats[:,0],
-            "marginal_entropy":stats[:,1],
-            "total_correlation":stats[:,2]
-        }
+    if epoch % (CONF['epochs']//100) == 0:       
+        stats = loss_fn.make_stats(activity,
+                                    bandwidth_factor=CONF['bandwidth_factor'],
+                                    k_knn=CONF['k_knn'])
+        logger.save_stats(epoch=epoch,stats=stats)
+        is_best = (stats["full_array_entropy"] > best_so_far)
+        if is_best: 
+            best_so_far = stats["full_array_entropy"]
+            logger.save_checkpoint(epoch, env, physics, receptor_indices, is_best=is_best)
+        elif checkpoints: 
+            logger.save_checkpoint(epoch, env, physics, receptor_indices, is_best=is_best)
+        print(f"Epoch {epoch}: Entropy = {stats['full_array_entropy']:.4f}")
+        
+
+print(f"\nOptimization complete. Results saved to {logger.stats_path}")
