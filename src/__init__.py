@@ -1,4 +1,4 @@
-# core/__init__.py
+# src/__init__.py
 
 from .environment import (
     LigandEnvironment, 
@@ -6,21 +6,27 @@ from .environment import (
     LogNormalConcentration, 
     NormalConcentration
 )
-from .physics import Receptor
+from .physics import BinaryReceptor,MWCReceptor,BaseReceptor
 from .geometry import generate_receptor_indices
-from .analysis_helper import plot_family_summary,evaluate_model,plot_latent_radar_chart
+from .analysis_helper import (plot_family_summary,
+                                plot_summary,evaluate_model,plot_latent_radar_chart,
+                                plot_latent_umap)
 from .IO import ExperimentLoader,ExperimentLogger
 
 # Exposing these allows for clean imports like:
 # from core import MWCReceptorLayer, NormalConcentration
 __all__ = [
     "LigandEnvironment", 
-    "Receptor", 
+    "BinaryReceptor",
+    "BaseReceptor"
+    "MWC·Receptor",
     "ConcentrationModel", 
     "LogNormalConcentration", 
     "NormalConcentration",
     "generate_receptor_indices",
     "plot_family_summary",
+    "plot_summary",
+    "plot_latent_umap",
     "ExperimentLogger",
     "ExperimentLoader",
     "evaluate_model"

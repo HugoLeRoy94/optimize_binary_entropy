@@ -9,7 +9,7 @@ import glob
 
 
 from src.environment import LigandEnvironment, LogNormalConcentration
-from src.physics import Receptor
+from src.physics import MWCReceptor,BinaryReceptor
 from objectives.loss import ExactInformationLoss
 
 # ==========================================

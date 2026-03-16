@@ -5,6 +5,28 @@ import torch.distributions as dist
 from typing import Tuple
 from abc import ABC, abstractmethod
 
+class UniformNBall:
+    """
+    Custom differentiable sampler for an N-dimensional solid sphere (N-ball).
+    """
+    def __init__(self, loc: torch.Tensor, radius: float, dim: int):
+        self.loc = loc          # Shape: (Batch, latent_dim)
+        self.radius = radius    # Scalar
+        self.dim = dim          # Scalar (latent_dim)
+
+    def rsample(self) -> torch.Tensor:
+        # 1. Sample a perfectly random direction
+        direction = torch.randn_like(self.loc)
+        direction = torch.nn.functional.normalize(direction, p=2, dim=-1)
+        
+        # 2. Sample the radius to ensure uniform volume density
+        # Draw U ~ Uniform(0, 1)
+        u = torch.rand(self.loc.shape[0], 1, device=self.loc.device)
+        r = self.radius * (u ** (1.0 / self.dim))
+        
+        # 3. Scale and shift
+        return self.loc + (direction * r)
+
 class ConcentrationModel(nn.Module, ABC):
     """
     Abstract Base Class for different concentration strategies.
@@ -146,108 +168,100 @@ class NormalConcentration(ConcentrationModel):
 
 class LigandEnvironment(nn.Module):
     def __init__(self, n_units: int, n_families: int, conc_model: ConcentrationModel, 
-                 sigma_init=1.0, delta_shift=4.0, latent_dim=3):
+                 latent_dim: int = 3, shape_sigma: float = 0.5, distribution_type: str = 'gaussian'):
         """
         Args:
             n_units: Number of protein units
             n_families: Number of ligand families
             conc_model: An INSTANCE of a ConcentrationModel subclass
-            sigma_init: Spread of the initial affinities
-            delta_shift: Energy penalty for the closed state to ensure Kc > Ko
             latent_dim: Dimensionality of the chemical latent space (trade-off space)
+            shape_sigma: The fixed spatial spread (fuzziness) of the ligand families
+            distribution_type: 'gaussian' or 'uniform'
         """
         super().__init__()
         self.n_units = n_units
         self.n_families = n_families
         self.latent_dim = latent_dim
+        self.shape_sigma = shape_sigma
+        
+        if distribution_type not in ['gaussian', 'uniform']:
+            raise ValueError("distribution_type must be 'gaussian' or 'uniform'")
+        self.distribution_type = distribution_type
         
         # 1. Inject the Concentration Strategy
         self.concentration_model = conc_model
         
         # ----------------------------------------------------------------------
-        # CHEMICAL LATENT SPACE INITIALIZATION
+        # MECHANISTIC LATENT SPACE INITIALIZATION
         # ----------------------------------------------------------------------
         
-        # Embeddings for units and families. A smaller distance = stronger binding.
+        # 1. The Octopus Adapts (Learnable Unit Coordinates)
         self.unit_latent = nn.Parameter(torch.randn(n_units, latent_dim))
-        # Create the tensor and normalize it to the unit hypersphere
+        
+        # 2. The Environment is Fixed (Family Prototype Coordinates)
         fixed_families = torch.randn(n_families, latent_dim)
         fixed_families = torch.nn.functional.normalize(fixed_families, p=2, dim=1)
-        # Register it correctly as a buffer
         self.register_buffer('family_latent', fixed_families)
         
-        
-        # Initialize around the global average concentration to ensure stable gradients at start.
+        # 3. Unit-specific Base Energies (Maximum intrinsic affinity)
         global_avg_log_c = self.concentration_model.get_expected_log_c().mean().item()
-        self.base_energy_u = nn.Parameter(torch.ones(n_units, 1) * global_avg_log_c)
-        
-        # Ensure Closed-State Energies are strictly weaker (higher) than open state
-        init_raw_delta = math.log(math.exp(delta_shift) - 1.0) if delta_shift > 0 else 0.0
-        self.raw_delta_shift = nn.Parameter(torch.ones(n_units, n_families) * init_raw_delta)
-        
-        # 2. Standard Deviations (uncorrelated across families for now)
-        self.interaction_log_sigma = nn.Parameter(torch.zeros(n_units, n_families, 2))
-    
+        self.base_energy_u = nn.Parameter(torch.ones(n_units) * global_avg_log_c)
+
     @property
     def interaction_mu(self) -> torch.Tensor:
         """
-        Dynamically computes the interaction_mu matrix from the latent space embeddings.
-        This behaves exactly like the old Parameter, making it a drop-in replacement 
-        for your other scripts.
-        Shape: (n_units, n_families, 2)
+        Compatibility property for plotting dose-response curves.
+        Returns the MEAN open-state energy for each unit against each family's exact center.
+        Shape: (n_units, n_families)
         """
-        # A. Compute Squared Euclidean Distance: ||v_u - v_f||^2
         diff = self.unit_latent.unsqueeze(1) - self.family_latent.unsqueeze(0)
-        dist_sq = (diff ** 2).sum(dim=-1) # Shape: (n_units, n_families)
+        dist_sq = (diff ** 2).sum(dim=-1) 
         
-        # B. Compute Open State Energy
-        # Equation: Expected_c + (Distance * Scale) - Base_Affinity
-        mu_open = self.base_energy_u + dist_sq
-        
-        # D. Compute Closed State Energy
-        delta = torch.nn.functional.softplus(self.raw_delta_shift)
-        mu_closed = mu_open + delta
-        
-        return torch.stack([mu_open, mu_closed], dim=-1)
+        mu_open = self.base_energy_u.unsqueeze(1) + dist_sq
+        return mu_open
 
     def sample_batch(self, batch_size: int):
-        """Used in training: Samples random families."""
         device = self.unit_latent.device
         family_ids = torch.randint(0, self.n_families, (batch_size,), device=device)
-        
-        energies, concentrations = self._sample_from_ids(batch_size, family_ids)
-        return energies, concentrations, family_ids
+        return self._sample_from_ids(batch_size, family_ids)
 
     def sample_specific_family(self, batch_size: int, family_id: int):
-        """Samples ligands and energies for one specific family only."""
         device = self.unit_latent.device
         f_ids = torch.full((batch_size,), family_id, dtype=torch.long, device=device)
-        
-        # Now we can reuse the logic we already wrote!
         return self._sample_from_ids(batch_size, f_ids)
 
-    def _sample_from_ids(self, batch_size, family_ids):
-        """Internal helper to avoid code duplication between sample_batch and specific sampling."""
+    def _sample_from_ids(self, batch_size: int, family_ids: torch.Tensor):
+        # 1. Sample physical concentrations
         concs = self.concentration_model.sample(batch_size, family_ids)
         
-        mu_T = self.interaction_mu.permute(1, 0, 2)
-        sigma_T = torch.exp(self.interaction_log_sigma.permute(1, 0, 2))
+        # 2. Get the prototype centers for this batch: (Batch, latent_dim)
+        batch_centers = self.family_latent[family_ids] 
         
-        energies = torch.distributions.Normal(
-            mu_T[family_ids], 
-            sigma_T[family_ids]
-        ).rsample()
+        # 3. Draw Ligand Coordinates directly from a PyTorch Distribution
+        if self.distribution_type == 'gaussian':
+            # Isotropic Gaussian: variance is shape_sigma^2 in all directions
+            ligand_dist = dist.Normal(loc=batch_centers, scale=self.shape_sigma)
+            v_ligands = ligand_dist.rsample()
+            
+        elif self.distribution_type == 'uniform_cube':
+            # Uniform hypercube centered at batch_centers with side length 2 * shape_sigma
+            low = batch_centers - self.shape_sigma
+            high = batch_centers + self.shape_sigma
+            ligand_dist = dist.Uniform(low=low, high=high)
+            v_ligands = ligand_dist.rsample()
+        elif self.distribution_type == 'uniform':
+            # Use our custom uniform N-ball sampler!
+            ligand_dist = UniformNBall(loc=batch_centers, radius=self.shape_sigma, dim=self.latent_dim)
+            v_ligands = ligand_dist.rsample()
+            
+        # 4. Calculate Energies based on Distance
+        diff = v_ligands.unsqueeze(1) - self.unit_latent.unsqueeze(0)
+        dist_sq = (diff ** 2).sum(dim=-1) # Shape: (Batch, n_units)
         
-        return energies, concs
-
-    @torch.no_grad()
-    def get_distribution(self, family_id=None, n_points=200):
-        d = self.concentration_model.get_distribution(family_id)
-        x = torch.linspace(d.mean - 3*d.stddev, d.mean + 3*d.stddev, n_points,device = self.unit_latent.device)
-        pdf = torch.exp(d.log_prob(x))
-        return x.cpu().numpy(),pdf.cpu().numpy()
+        E_open = self.base_energy_u + dist_sq
+        
+        return E_open, concs, family_ids
 
     @torch.no_grad()
     def get_concentration_sweep(self, family_id: int, n_points: int = 200):
-        """Pass-through to get physical concentrations and pdf."""
         return self.concentration_model.get_sweep_and_pdf(family_id, n_points)
