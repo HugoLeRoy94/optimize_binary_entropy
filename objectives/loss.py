@@ -217,40 +217,54 @@ class DiscreteProxyLoss(nn.Module):
         centers = torch.linspace(0.0, 1.0, n_bins)
         self.register_buffer('bin_centers', centers)
 
+    def compute_soft_assignment(self, activity: torch.Tensor) -> torch.Tensor:
+        """
+        Computes soft assignments of continuous activity to discrete bins.
+
+        Args:
+            activity (torch.Tensor): Continuous activity tensor of shape (Batch, R).
+
+        Returns:
+            torch.Tensor: Soft assignment tensor of shape (Batch, R, n_bins).
+        """
+        act_expanded = activity.unsqueeze(-1)
+        centers_expanded = self.bin_centers.view(1, 1, -1)
+        
+        dist_sq = (act_expanded - centers_expanded) ** 2
+        soft_assign = torch.softmax(-dist_sq / self.bin_temp, dim=-1)
+        
+        return soft_assign
+
+    def compute_soft_marginal_probabilities(self, activity: torch.Tensor) -> torch.Tensor:
+        """
+        Computes marginal probabilities for each bin using a soft-assignment.
+
+        Args:
+            activity (torch.Tensor): Continuous activity tensor of shape (Batch, R).
+
+        Returns:
+            torch.Tensor: Marginal probabilities of shape (R, n_bins).
+        """
+        soft_assign = self.compute_soft_assignment(activity)
+        p_marginal = soft_assign.mean(dim=0)
+        return p_marginal
+
     def _compute_soft_histogram_entropy(self, activity: torch.Tensor) -> torch.Tensor:
         """
         Computes the discrete Shannon entropy using soft assignments.
         activity shape: (Batch, R)
         Returns shape: (R,) - entropy in bits.
         """
-        B, R = activity.shape
+        # 1. Get marginal probabilities from the shared function
+        p_marginal = self.compute_soft_marginal_probabilities(activity)
         
-        # 1. Expand dimensions to compute distances to all bin centers
-        # activity: (Batch, R, 1) | bin_centers: (1, 1, n_bins)
-        act_expanded = activity.unsqueeze(-1)
-
-        #centers = self.bin_centers.to(activity.device)
-        centers_expanded = self.bin_centers.to(activity.device).unsqueeze(0).unsqueeze(0)
-        
-        # 2. Compute Squared Distance
-        # Shape: (Batch, R, n_bins)
-        dist_sq = (act_expanded - centers_expanded) ** 2
-        
-        # 3. Soft Assignment using Softmax over the bins dimension
-        # A smaller bin_temp makes the assignment act more like a hard step-function
-        soft_assign = torch.softmax(-dist_sq / self.bin_temp, dim=-1)
-        
-        # 4. Marginal Probability of falling into each bin
-        # Average over the batch. Shape: (R, n_bins)
-        p_marginal = soft_assign.mean(dim=0)
-        
-        # 5. Clamp to prevent log2(0) crashes
+        # 2. Clamp to prevent log2(0) crashes
         p_marginal = torch.clamp(p_marginal, min=1e-12)
         
-        # Calculate log base K using the change-of-base formula: ln(p) / ln(K)
+        # 3. Calculate log base K using the change-of-base formula: ln(p) / ln(K)
         log_k_p = torch.log(p_marginal) / math.log(self.n_bins)
         
-        # Exact Normalized Shannon Entropy
+        # 4. Exact Normalized Shannon Entropy
         entropy = -torch.sum(p_marginal * log_k_p, dim=-1)
         
         return entropy
@@ -298,10 +312,7 @@ class DiscreteProxyLoss(nn.Module):
         # 2. Joint Entropy Calculation
         # ==========================================================
         # Re-calculate soft assignments to build the joint probabilities
-        act_expanded = activity.unsqueeze(-1)
-        centers = self.bin_centers.to(activity.device)
-        dist_sq = (act_expanded - centers.unsqueeze(0).unsqueeze(0)) ** 2
-        soft_assign = torch.softmax(-dist_sq / self.bin_temp, dim=-1) # Shape: (B, R, K)
+        soft_assign = self.compute_soft_assignment(activity) # Shape: (B, R, K)
         
         # Dynamic switch based on computational complexity
         if K ** R <= 1_000_000:

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
+import numpy as np
 
 class BaseReceptor(nn.Module, ABC):
     """
@@ -60,14 +61,65 @@ class BaseReceptor(nn.Module, ABC):
         return torch.clamp(p_o, 0.0, 1.0)
 
     @torch.no_grad()
-    def get_dose_response(self, env, receptor_indices, family_id, n_points=200, method='absolute'):
-        c_sweep, _ = env.get_concentration_sweep(family_id, n_points)
-        c_reshaped = c_sweep.view(n_points, 1, 1)
+    def get_dose_response(self, env, receptor_indices, family_id, n_points=200, method='absolute', quadrature_degree=10):
+        """
+        Calculates the dose-response curve for a given family.
+        If env.distribution_type is 'gaussian' and the receptor is a BinaryReceptor,
+        it uses Gauss-Hermite quadrature to integrate over the distribution of
+        ligand shapes for a more accurate response.
+        Otherwise, it uses the mean interaction energy.
+        """
+        if env.distribution_type != 'gaussian' or not isinstance(self, BinaryReceptor):
+            c_sweep, _ = env.get_concentration_sweep(family_id, n_points)
+            c_reshaped = c_sweep.view(n_points, 1, 1)
 
-        # Delegate the energy extraction to the subclass
-        gathered_energies = self._extract_mean_energies(env, receptor_indices, family_id, n_points)
+            gathered_energies = self._extract_mean_energies(env, receptor_indices, family_id, n_points)
+            
+            p_o = self.p_open(c_reshaped, gathered_energies) 
+            
+            if method == "self_normalized":
+                p_max = torch.max(p_o, dim=0, keepdim=True).values
+                p_o =  p_o / (p_max + 1e-8)
+            
+            return c_sweep.cpu().numpy(), p_o.cpu().numpy()
+
+        # --- Quadrature Method for Gaussian Distribution in a BinaryReceptor ---
         
-        p_o = self.p_open(c_reshaped, gathered_energies) 
+        device = env.unit_latent.device
+        c_sweep, _ = env.get_concentration_sweep(family_id, n_points)
+
+        # 1. Get Quadrature nodes and weights for N(0,1)
+        nodes, weights = np.polynomial.hermite.hermgauss(quadrature_degree)
+        nodes = torch.from_numpy(nodes.astype(np.float32)).to(device) * np.sqrt(2.)
+        weights = torch.from_numpy(weights.astype(np.float32)).to(device) / np.sqrt(np.pi)
+
+        # Create grid for latent_dim
+        nodes_grid = torch.stack(torch.meshgrid([nodes] * env.latent_dim, indexing='ij'), dim=-1).view(-1, env.latent_dim)
+        weights_grid = torch.prod(torch.stack(torch.meshgrid([weights] * env.latent_dim, indexing='ij'), dim=-1).view(-1, env.latent_dim), dim=1)
+        n_quad = nodes_grid.shape[0]
+
+        # 2. Get unit and family info
+        unit_latents = env.unit_latent[receptor_indices] 
+        family_latent = env.family_latent[family_id] 
+        base_energies = env.base_energy_u[receptor_indices]
+
+        # 3. Transform nodes to sample from ligand distribution v ~ N(family_latent, env.shape_sigma)
+        v_samples = family_latent.unsqueeze(0) + nodes_grid * env.shape_sigma 
+
+        # 4. Calculate energies for each quadrature sample point
+        diff = v_samples.view(n_quad, 1, 1, env.latent_dim) - unit_latents.view(1, *unit_latents.shape)
+        dist_sq = (diff ** 2).sum(dim=-1)
+        E_open_samples = base_energies.unsqueeze(0) + dist_sq
+
+        # 5. Compute p_open for each sample and concentration, then average
+        log_ec50 = E_open_samples.mean(dim=-1) # (n_quad, N_r)
+        ln_c = torch.log(c_sweep.view(-1, 1, 1) + 1e-12) # (n_points, 1, 1)
+        
+        # p_o_samples has shape (n_points, n_quad, N_r)
+        p_o_samples = torch.sigmoid((ln_c - log_ec50.unsqueeze(0)) / self.temperature)
+        
+        # Weighted average over quadrature samples
+        p_o = torch.einsum('pqr,q->pr', p_o_samples, weights_grid)
         
         if method == "self_normalized":
             p_max = torch.max(p_o, dim=0, keepdim=True).values

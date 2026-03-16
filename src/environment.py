@@ -65,8 +65,15 @@ class LogNormalConcentration(ConcentrationModel):
         # Initialize around 10^-6 M (1 microM)
         #self.mu = nn.Parameter(torch.ones(n_families) * init_mean)
         #self.log_sigma = nn.Parameter(torch.ones(n_families) * math.log(init_scale))
-        self.register_buffer('mu', torch.ones(n_families) * init_mean)
-        self.register_buffer('log_sigma', torch.ones(n_families) * math.log(init_scale))
+        
+        mu_tensor = torch.tensor(init_mean, dtype=torch.float32)
+        if mu_tensor.ndim == 0:
+            mu_tensor = torch.ones(n_families) * mu_tensor
+            
+        sigma_tensor = torch.tensor(init_scale, dtype=torch.float32)
+        
+        self.register_buffer('mu', mu_tensor)
+        self.register_buffer('log_sigma', torch.ones(n_families) * torch.log(sigma_tensor))
 
     def sample(self, batch_size, family_ids):
         # Gather params for this batch

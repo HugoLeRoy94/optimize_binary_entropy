@@ -2,19 +2,16 @@ import torch
 import math
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec    
+from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 import seaborn as sns
 import umap
 
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
 from src.environment import LogNormalConcentration # Adjust import path as needed
+from objectives.loss import DiscreteProxyLoss
 
 
 @torch.no_grad()
-def plot_family_summary(env, physics, receptor_indices, n_points=200):
+def plot_family_summary(env, physics, receptor_indices, n_points=200, axes=None):
     """
     Creates a comprehensive summary plot for each ligand family adapted to the discrete model:
     1. Dose-response curves as step functions (Main Frame)
@@ -27,13 +24,16 @@ def plot_family_summary(env, physics, receptor_indices, n_points=200):
     
     # Generate a color palette for the receptors
     colors = plt.cm.viridis(np.linspace(0, 0.9, N_Receptors))
-    
-    fig = plt.figure(figsize=(8, 6))
-    gs = GridSpec(4, 4, figure=fig, hspace=0.1, wspace=0.1)
-    
-    ax_main = fig.add_subplot(gs[0:3, 0:3])
-    ax_bottom = fig.add_subplot(gs[3, 0:3], sharex=ax_main)
-    ax_right = fig.add_subplot(gs[0:3, 3], sharey=ax_main)
+
+    if axes is None:
+        fig = plt.figure(figsize=(8, 6))
+        gs = GridSpec(4, 4, figure=fig, hspace=0.1, wspace=0.1)
+        ax_main = fig.add_subplot(gs[0:3, 0:3])
+        ax_bottom = fig.add_subplot(gs[3, 0:3], sharex=ax_main)
+        ax_right = fig.add_subplot(gs[0:3, 3], sharey=ax_main)
+    else:
+        ax_main, ax_bottom, ax_right = axes
+        fig = ax_main.figure
 
     for f_idx in range(n_families):
         
@@ -107,9 +107,11 @@ def plot_family_summary(env, physics, receptor_indices, n_points=200):
     return fig, axes
 
 @torch.no_grad()
-def plot_summary(env, physics, receptor_indices, n_points=200):
+def plot_summary(env, physics, receptor_indices, loss_fn=None, n_points=200, axes=None):
     """
     Creates a SINGLE comprehensive summary plot for all ligand families.
+    If a DiscreteProxyLoss is provided, it uses the soft-binned probabilities
+    for visualization, ensuring consistency with the loss function.
     """
     device = env.unit_latent.device
     N_Receptors = receptor_indices.shape[0]
@@ -117,66 +119,84 @@ def plot_summary(env, physics, receptor_indices, n_points=200):
     
     colors = plt.cm.viridis(np.linspace(0, 0.9, N_Receptors))
     
-    # 1. Initialize Figure ONCE
-    fig = plt.figure(figsize=(4, 3))
-    gs = GridSpec(4, 4, figure=fig, hspace=0.1, wspace=0.1)
+    if axes is None:
+        fig = plt.figure(figsize=(4, 3))
+        gs = GridSpec(4, 4, figure=fig, hspace=0.1, wspace=0.1)
+        ax_main = fig.add_subplot(gs[0:3, 0:3])
+        ax_bottom = fig.add_subplot(gs[3, 0:3], sharex=ax_main)
+        ax_right = fig.add_subplot(gs[0:3, 3], sharey=ax_main)
+    elif not isinstance(axes, (list, tuple, np.ndarray)):
+        # If a single axis is passed, create the gridspec inside it
+        ax = axes
+        fig = ax.figure
+        spec = ax.get_subplotspec()
+        ax.set_visible(False)
+
+        gs = GridSpecFromSubplotSpec(4, 4, subplot_spec=spec, hspace=0.1, wspace=0.1)
+        ax_main = fig.add_subplot(gs[0:3, 0:3])
+        ax_bottom = fig.add_subplot(gs[3, 0:3], sharex=ax_main)
+        ax_right = fig.add_subplot(gs[0:3, 3], sharey=ax_main)
+    else:
+        ax_main, ax_bottom, ax_right = axes
+        fig = ax_main.figure
     
-    ax_main = fig.add_subplot(gs[0:3, 0:3])
-    ax_bottom = fig.add_subplot(gs[3, 0:3], sharex=ax_main)
-    ax_right = fig.add_subplot(gs[0:3, 3], sharey=ax_main)
-    
-    # 2. Smart X-Axis Scaling
     if isinstance(env.concentration_model, LogNormalConcentration):
         ax_main.set_xscale('log')
     
-    # Array to accumulate the global probabilities for the right panel
     global_p_active = np.zeros(N_Receptors)
-    
+    global_p_inactive = np.zeros(N_Receptors)
+    use_binned_probs = isinstance(loss_fn, DiscreteProxyLoss) and loss_fn.n_bins == 2
+
     for f_idx in range(n_families):
-        # --- Data Prep ---
         c_sweep_tensor, c_pdf_tensor = env.get_concentration_sweep(f_idx, n_points=n_points)
         c_sweep_np = c_sweep_tensor.cpu().numpy()
         c_pdf_np = c_pdf_tensor.cpu().numpy()
-        
         c_weights = c_pdf_np / (np.sum(c_pdf_np) + 1e-12)
         
         _, p_o_np = physics.get_dose_response(env, receptor_indices, f_idx, n_points=n_points, method='absolute')
+
+        p_plot_active = p_o_np
         
-        # --- Plotting Main and Bottom Frames ---
-        # (Using alpha to make overlapping lines readable)
+        if use_binned_probs:
+            p_o_tensor = torch.from_numpy(p_o_np).to(device)
+            soft_assign = loss_fn.compute_soft_assignment(p_o_tensor) # (points, R, bins)
+            
+            p_plot_active = soft_assign[..., -1].cpu().numpy()
+            p_plot_inactive = soft_assign[..., 0].cpu().numpy()
+
+            family_p_inactive = np.sum(p_plot_inactive * c_weights[:, None], axis=0)
+            global_p_inactive += (family_p_inactive / n_families)
+
         for r in range(N_Receptors):
-            ax_main.plot(c_sweep_np, p_o_np[:, r], color=colors[r], lw=2.5, alpha=1.)
+            ax_main.plot(c_sweep_np, p_plot_active[:, r], color=colors[r], lw=2.5, alpha=1.)
             
         ax_bottom.fill_between(c_sweep_np, c_pdf_np, color='gray', alpha=0.15)
         ax_bottom.plot(c_sweep_np, c_pdf_np, color='black', lw=1., alpha=1.)
         
-        # Accumulate the expected probability for this family
-        family_p_active = np.sum(p_o_np * c_weights[:, None], axis=0)
+        family_p_active = np.sum(p_plot_active * c_weights[:, None], axis=0)
         global_p_active += (family_p_active / n_families)
         
-    # --- Formatting Main & Bottom ---
+    if not use_binned_probs:
+        global_p_inactive = 1.0 - global_p_active
+
     ax_main.set_ylabel("Activity Probability $p(a=1)$", fontsize=9)
     ax_main.tick_params(labelbottom=False, direction='in') 
     ax_main.set_title("Global Receptor Array Binary Response", fontsize=9, fontweight='bold')
-    #ax_main.set_ylim(-0.05, 1.05)
-
     
     ax_bottom.set_xlabel("Concentration (M)", fontsize=9)
     ax_bottom.set_ylabel("p(c)", fontsize=9)
     ax_bottom.set_yticks([]) 
     ax_bottom.tick_params(direction='in')
     
-    # --- Plotting Right Frame (Global Marginal Probability) ONCE ---
-    global_p_inactive = 1.0 - global_p_active
     bar_height = 0.2 / N_Receptors 
     padding = (N_Receptors / 2) * bar_height * 1.3
     ax_main.set_ylim(-padding, 1.0 + padding)
     
     for r in range(N_Receptors):
-        r = (N_Receptors-1)-r
+        r_rev = (N_Receptors-1)-r
         y_offset = (r - N_Receptors/2) * bar_height
-        ax_right.barh(0.0 + y_offset, global_p_inactive[r], height=bar_height, edgecolor=colors[r], alpha=0.8,facecolor='none',linewidth=2.5)
-        ax_right.barh(1.0 + y_offset, global_p_active[r], height=bar_height, edgecolor=colors[r], alpha=0.8,facecolor='none',linewidth=2.5)
+        ax_right.barh(0.0 + y_offset, global_p_inactive[r_rev], height=bar_height, edgecolor=colors[r_rev], alpha=0.8, facecolor='none', linewidth=2.5)
+        ax_right.barh(1.0 + y_offset, global_p_active[r_rev], height=bar_height, edgecolor=colors[r_rev], alpha=0.8, facecolor='none', linewidth=2.5)
         
     ax_right.set_xlabel("Global Mass", fontsize=9)
     ax_right.tick_params(labelleft=False, direction='in') 
@@ -198,7 +218,7 @@ def evaluate_model(env,physics,receptor_indices,loss_fn,n_samples=2000,k_knn = 5
 
 
 @torch.no_grad()
-def plot_latent_radar_chart(env, receptor_indices, receptors_to_plot=None, family_names=None):
+def plot_latent_radar_chart(env, receptor_indices, receptors_to_plot=None, family_names=None, ax=None):
     """
     Creates a radar chart showing the relative binding strength of 
     fully assembled receptors (heteromers) across all ligand families.
@@ -231,7 +251,10 @@ def plot_latent_radar_chart(env, receptor_indices, receptors_to_plot=None, famil
     angles += angles[:1] # Close the loop
     
     # 5. Plotting
-    fig, ax = plt.subplots(figsize=(5, 4), subplot_kw=dict(polar=True))
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(5, 4), subplot_kw=dict(polar=True))
+    else:
+        fig = ax.figure
     ax.set_theta_offset(np.pi / 2)
     ax.set_theta_direction(-1)
     
@@ -252,7 +275,8 @@ def plot_latent_radar_chart(env, receptor_indices, receptors_to_plot=None, famil
         
     plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize=9)
     #plt.title("Assembled Receptor Affinity Profile", y=1.08, fontweight='bold')
-    plt.tight_layout()
+    if ax is None:
+        plt.tight_layout()
     
     return fig, ax
 
@@ -260,7 +284,7 @@ def plot_latent_radar_chart(env, receptor_indices, receptors_to_plot=None, famil
 # from core.environment import UniformNBall
 
 @torch.no_grad()
-def plot_latent_umap(env, receptor_indices, n_samples_per_family=1000, random_state=42):
+def plot_latent_umap(env, receptor_indices, n_samples_per_family=1000, random_state=42, ax=None):
     """
     Projects the N-dimensional chemical latent space into 2D using UMAP.
     Visualizes the families as density gradients (regions), the family centers as circles,
@@ -331,7 +355,10 @@ def plot_latent_umap(env, receptor_indices, n_samples_per_family=1000, random_st
     # =====================================================================
     # 4. PLOTTING
     # =====================================================================
-    fig, ax = plt.subplots(figsize=(5, 4))
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(5, 4))
+    else:
+        fig = ax.figure
     
     # Generate a distinct color palette
     colors = plt.cm.tab10.colors if n_families <= 10 else plt.cm.viridis(np.linspace(0, 1, n_families))

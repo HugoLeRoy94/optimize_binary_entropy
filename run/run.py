@@ -24,7 +24,7 @@ from objectives import DiscreteProxyLoss
 def initialize(CONF:dict)->tuple[LigandEnvironment,BaseReceptor,DiscreteProxyLoss,optim.Optimizer]:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     conc_strategy = LogNormalConcentration(n_families=CONF['n_families'], 
-                                            init_mean=5.0)
+                                            init_mean=CONF['init_means'])
     env = LigandEnvironment(CONF['n_units'], 
                         CONF['n_families'], 
                         conc_model=conc_strategy,
@@ -33,7 +33,7 @@ def initialize(CONF:dict)->tuple[LigandEnvironment,BaseReceptor,DiscreteProxyLos
     
     loss_fn = DiscreteProxyLoss(cov_weight = CONF["cov_weight"],
                                 n_bins=CONF['n_bins'],
-                                bin_temp=CONF["bin_temp"])
+                                bin_temp=CONF["bin_temp"]).to(device)
 
     optimizer = optim.Adam(list(env.parameters()) + 
                             list(physics.parameters()),
