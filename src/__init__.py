@@ -7,7 +7,7 @@ from .environment import (
     NormalConcentration
 )
 from .physics import BinaryReceptor,MWCReceptor,BaseReceptor
-from .geometry import generate_receptor_indices
+from .geometry import (generate_receptor_indices,generate_cascading_receptors,generate_targeted_receptors)
 from .analysis_helper import (plot_family_summary,
                                 plot_summary,evaluate_model,plot_latent_radar_chart,
                                 plot_latent_umap)
@@ -24,6 +24,8 @@ __all__ = [
     "LogNormalConcentration", 
     "NormalConcentration",
     "generate_receptor_indices",
+    "generate_cascading_receptors",
+    "generate_targeted_receptors"
     "plot_family_summary",
     "plot_summary",
     "plot_latent_umap",
