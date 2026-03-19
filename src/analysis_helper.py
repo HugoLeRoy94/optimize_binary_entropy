@@ -7,7 +7,7 @@ import seaborn as sns
 import umap
 
 from src.environment import LogNormalConcentration # Adjust import path as needed
-from objectives.loss import DiscreteProxyLoss
+from objectives import DiscreteProxyLoss, compute_discrete_joint_entropy
 
 
 @torch.no_grad()
@@ -206,7 +206,7 @@ def plot_summary(env, physics, receptor_indices, loss_fn=None, n_points=200, axe
     return fig, (ax_main, ax_bottom, ax_right)
 
 @torch.no_grad()
-def evaluate_model(env,physics,receptor_indices,loss_fn,n_samples=2000,k_knn = 5.):
+def evaluate_model(env,physics,receptor_indices,loss_fn,n_samples=2000):
     device = env.interaction_mu.device
     N_Receptors = receptor_indices.shape[0]
     # draw random ligands
@@ -214,7 +214,8 @@ def evaluate_model(env,physics,receptor_indices,loss_fn,n_samples=2000,k_knn = 5
     # compute the activity array
     activity = physics(energies, concs, receptor_indices)
 
-    return loss_fn._compute_soft_histogram_entropy(activity)
+    soft_assign = loss_fn.compute_soft_assignment(activity)
+    return compute_discrete_joint_entropy(soft_assign)
 
 
 @torch.no_grad()
@@ -344,7 +345,7 @@ def plot_latent_umap(env, receptor_indices, n_samples_per_family=1000, random_st
     all_data = np.vstack([v_families, v_receptors, sampled_points])
     
     print("Fitting UMAP... (This may take a few seconds)")
-    reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, metric='euclidean', random_state=random_state)
+    reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, metric='euclidean')#, random_state=random_state)
     embedding = reducer.fit_transform(all_data)
     
     # Unpack the embeddings
@@ -372,7 +373,7 @@ def plot_latent_umap(env, receptor_indices, n_samples_per_family=1000, random_st
         sns.kdeplot(
             x=pts[:, 0], y=pts[:, 1], 
             ax=ax, fill=True, color=c, alpha=0.3, 
-            levels=5, thresh=0.05, linewidths=0.5
+            levels=5, thresh=0.05
         )
         
         # Plot the exact family center (now a circle)
