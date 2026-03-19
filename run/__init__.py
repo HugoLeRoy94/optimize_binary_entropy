@@ -1,5 +1,5 @@
 # run/__init__.py
 
-from .run import run,initialize
+from .run import train,test,initialize
 
-__all__=['run','initialize']
+__all__=['train','initialize','test']

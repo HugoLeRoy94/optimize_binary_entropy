@@ -28,7 +28,8 @@ def initialize(CONF:dict)->tuple[LigandEnvironment,BaseReceptor,DiscreteProxyLos
     env = LigandEnvironment(CONF['n_units'], 
                         CONF['n_families'], 
                         conc_model=conc_strategy,
-                        latent_dim=CONF['latent_dim']).to(device)
+                        latent_dim=CONF['latent_dim'],
+                        shape_sigma=CONF.get('shape_sigma', 0.5)).to(device)
     physics = BinaryReceptor(CONF["n_units"], CONF["k_sub"]).to(device)
     
     loss_fn = DiscreteProxyLoss(cov_weight = CONF["cov_weight"],
@@ -42,7 +43,7 @@ def initialize(CONF:dict)->tuple[LigandEnvironment,BaseReceptor,DiscreteProxyLos
     return env,physics,loss_fn,optimizer
 
 
-def run(CONF:dict,
+def train(CONF:dict,
         env:LigandEnvironment,
         physics:BaseReceptor,
         loss_fn:DiscreteProxyLoss,
@@ -80,7 +81,20 @@ def run(CONF:dict,
                 
                 # 3. Compute highly accurate stats
                 stat = loss_fn.make_stats(activity)
-                print(f"Total Correlation: {stat['total_correlation']:.4f}")
+                #print(f"Total Correlation: {stat['total_correlation']:.4f}")
                 stats.append(stat)
     stats = {key:[stats[i][key] for i in range(stats.__len__())] for key in stats[0].keys()}
     return stats
+
+def test(CONF:dict,
+    env:LigandEnvironment,
+    physics:BaseReceptor,
+    loss_fn:DiscreteProxyLoss,
+    optimizer:optim.Optimizer,
+    indices:torch.Tensor,
+    N_samples:int,
+    epoch:int = 100)->list:        
+    ents = []
+    for _ in range(epoch):
+        ents.append(evaluate_model(env=env,physics=physics,receptor_indices=indices,loss_fn=loss_fn,n_samples=N_samples))
+    return ents
