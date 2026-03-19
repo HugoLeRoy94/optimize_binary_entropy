@@ -206,13 +206,19 @@ class LigandEnvironment(nn.Module):
         self.unit_latent = nn.Parameter(torch.randn(n_units, latent_dim))
         
         # 2. The Environment is Fixed (Family Prototype Coordinates)
-        fixed_families = torch.randn(n_families, latent_dim)
-        fixed_families = torch.nn.functional.normalize(fixed_families, p=2, dim=1)
+        fixed_families = self._generate_family_centers(n_families, latent_dim)
         self.register_buffer('family_latent', fixed_families)
         
         # 3. Unit-specific Base Energies (Maximum intrinsic affinity)
         global_avg_log_c = self.concentration_model.get_expected_log_c().mean().item()
         self.base_energy_u = nn.Parameter(torch.ones(n_units) * global_avg_log_c)
+
+    def _generate_family_centers(self, n_families: int, latent_dim: int) -> torch.Tensor:
+        """
+        Default behavior: Random prototype centers on the unit hypersphere.
+        """
+        fixed_families = torch.randn(n_families, latent_dim)
+        return torch.nn.functional.normalize(fixed_families, p=2, dim=1)
 
     @property
     def interaction_mu(self) -> torch.Tensor:
@@ -272,3 +278,37 @@ class LigandEnvironment(nn.Module):
     @torch.no_grad()
     def get_concentration_sweep(self, family_id: int, n_points: int = 200):
         return self.concentration_model.get_sweep_and_pdf(family_id, n_points)
+
+class SymmetricLigandEnvironment(LigandEnvironment):
+    """
+    Environment that enforces symmetric, evenly spaced prototype centers 
+    to explicitly test heteromerization gaps.
+    """
+    def _generate_family_centers(self, n_families: int, latent_dim: int) -> torch.Tensor:
+        if latent_dim < 2:
+            return torch.linspace(-1, 1, n_families).unsqueeze(-1)
+            
+        if latent_dim == 2:
+            angles = torch.linspace(0, 2 * math.pi, n_families + 1)[:-1]
+            x = torch.cos(angles)
+            y = torch.sin(angles)
+            return torch.stack([x, y], dim=1)
+            
+        if latent_dim == 3 and n_families == 4:
+            return torch.tensor([
+                [ math.sqrt(8/9),  0.0,             -1/3],
+                [-math.sqrt(2/9),  math.sqrt(2/3),  -1/3],
+                [-math.sqrt(2/9), -math.sqrt(2/3),  -1/3],
+                [ 0.0,             0.0,              1.0]
+            ], dtype=torch.float32)
+
+        if latent_dim == 3 and n_families == 6:
+            return torch.tensor([
+                [ 1.0,  0.0,  0.0], [-1.0,  0.0,  0.0],
+                [ 0.0,  1.0,  0.0], [ 0.0, -1.0,  0.0],
+                [ 0.0,  0.0,  1.0], [ 0.0,  0.0, -1.0]
+            ], dtype=torch.float32)
+
+        # Fallback to the base class random initialization if no geometry is defined
+        print(f"Warning: No explicit geometric structure defined for D={latent_dim}, F={n_families}. Falling back to random normalized vectors.")
+        return super()._generate_family_centers(n_families, latent_dim)
