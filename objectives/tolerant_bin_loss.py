@@ -31,20 +31,7 @@ def build_overlap_matrix(receptor_indices: torch.Tensor, n_units: int) -> torch.
     
     return overlap_matrix
 
-
-        """
-        Returns logging metrics for the training loop.
-        """
-        marginals = self._compute_analytical_marginal_entropies(activity)
-        cov_penalty = self._compute_covariance_penalty(activity)
-        
-        return {
-            "marginal_entropy_sum": marginals.sum().item(), 
-            "marginal_entropy_mean": marginals.mean().item(),
-            "covariance_penalty": cov_penalty.item()
-        }
-
-def compute_discrete_joint_entropy(soft_assign: torch.Tensor) -> float:
+def compute_discrete_joint_entropy(soft_assign: torch.Tensor) -> torch.Tensor:
     """
     Computes the joint entropy of a discrete system from soft assignments.
     Switches between exact enumeration for small state spaces and Monte Carlo
@@ -68,10 +55,10 @@ def compute_discrete_joint_entropy(soft_assign: torch.Tensor) -> float:
         # Average across the batch to get the true probability of every possible state
         p_a = joint_p.mean(dim=0) # Shape: (K^R,)
         
-        # Mask out strictly zero probabilities to prevent log2(0)
-        p_a = p_a[p_a > 1e-12]            
-        log_k_p = torch.log(p_a) / math.log(K)
-        joint_h = -torch.sum(p_a * log_k_p).item()
+        # Use clamp to prevent log2(0) while maintaining stable gradients
+        p_a_safe = torch.clamp(p_a, min=1e-12)
+        log_k_p = torch.log(p_a_safe) / math.log(K)
+        joint_h = -torch.sum(p_a * log_k_p)
         
     else:
         # ------------------------------------------------------
@@ -100,12 +87,13 @@ def compute_discrete_joint_entropy(soft_assign: torch.Tensor) -> float:
         p_a = p_a_given_x.mean(dim=0) # (B_a,)
         
         # 5. Monte Carlo average: Expected value of [-log_K P(state)]
-        log_k_p = torch.log(p_a + 1e-12) / math.log(K)
-        joint_h = -log_k_p.mean().item()
+        p_a_safe = torch.clamp(p_a, min=1e-12)
+        log_k_p = torch.log(p_a_safe) / math.log(K)
+        joint_h = -log_k_p.mean()
 
     return joint_h
 
-class DiscreteProxyLoss(nn.Module):
+class TolerantDiscreteProxyLoss(nn.Module):
     """
     Maximizes the discrete Shannon entropy using a Differentiable Soft Histogram.
     Can handle an arbitrary number of bins (n_bins >= 2).
@@ -198,6 +186,8 @@ class DiscreteProxyLoss(nn.Module):
         Returns:
             torch.Tensor: Soft assignment tensor of shape (Batch, R, n_bins).
         """
+        if self.n_bins == 2:
+            return torch.stack([1.0 - activity, activity], dim=-1)
         act_expanded = activity.unsqueeze(-1)
         centers_expanded = self.bin_centers.view(1, 1, -1)
         
@@ -295,7 +285,7 @@ class DiscreteProxyLoss(nn.Module):
         # 3. Return Dictionary
         # ==========================================================
         return {
-            "full_array_entropy": joint_h, 
+            "full_array_entropy": joint_h.item() if isinstance(joint_h, torch.Tensor) else joint_h, 
             "marginal_entropy": marginal_sum, 
-            "total_correlation": marginal_sum - joint_h
+            "total_correlation": marginal_sum - (joint_h.item() if isinstance(joint_h, torch.Tensor) else joint_h)
         }

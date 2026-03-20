@@ -215,7 +215,8 @@ def evaluate_model(env,physics,receptor_indices,loss_fn,n_samples=2000):
     activity = physics(energies, concs, receptor_indices)
 
     soft_assign = loss_fn.compute_soft_assignment(activity)
-    return compute_discrete_joint_entropy(soft_assign)
+    val = compute_discrete_joint_entropy(soft_assign)
+    return val.item() if isinstance(val, torch.Tensor) else val
 
 
 @torch.no_grad()

@@ -1,6 +1,7 @@
 # src/__init__.py
 
 from .environment import (
+    SymmetricLigandEnvironment,
     LigandEnvironment, 
     ConcentrationModel, 
     LogNormalConcentration, 
@@ -16,7 +17,8 @@ from .IO import ExperimentLoader,ExperimentLogger
 # Exposing these allows for clean imports like:
 # from core import MWCReceptorLayer, NormalConcentration
 __all__ = [
-    "LigandEnvironment", 
+    "LigandEnvironment",
+    "SymmetricLigandEnvironment",
     "BinaryReceptor",
     "BaseReceptor"
     "MWC·Receptor",
