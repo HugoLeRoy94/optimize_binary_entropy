@@ -92,22 +92,6 @@ class BaseInformationLoss(nn.Module, ABC):
         
         return density
     
-    @torch.no_grad()
-    def make_stats(self, activity: torch.Tensor,bandwidth_factor: float = 1.06, k_knn:int = 5):
-        # Detach just to be safe and ensure no graph is built
-        # .detach() is nearly instantaneous
-        act = activity.detach() 
-        
-        joint_h = self.compute_knn_joint_entropy(act, k_knn)
-        marginals = self.compute_kde_marginal_entropies(act, bandwidth_factor)
-        
-        # Use .item() to pull the scalars out to Python
-        return {
-            "full_array_entropy":joint_h.item(), 
-            "marginal_entropy":marginals.sum().item(), 
-            "total_correlation":(marginals.sum() - joint_h).item()
-        }
-    
     @abstractmethod
     def forward(self, activity: torch.Tensor):
         pass

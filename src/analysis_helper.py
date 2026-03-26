@@ -410,3 +410,64 @@ def plot_latent_umap(env, receptor_indices, n_samples_per_family=1000, random_st
     ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)
     
     return fig, ax
+
+@torch.no_grad()
+def receptor_distances(env, receptor_indices):
+    """
+    Computes the pairwise Euclidean distance between receptors in the latent space.
+    The position of an assembled receptor is determined by the centroid of its sub-units.
+    
+    Args:
+        env: Instantiated LigandEnvironment.
+        receptor_indices: Tensor of shape (N_Receptors, k_sub) mapping units to receptors.
+        
+    Returns:
+        dist_matrix: A (N_Receptors, N_Receptors) tensor containing the pairwise distances.
+    """
+    # Calculate the centroid of each assembled receptor: (N_Receptors, latent_dim)
+    v_receptors = env.unit_latent[receptor_indices].mean(dim=1)
+    
+    # Compute the pairwise Euclidean distance matrix
+    dist_matrix = torch.cdist(v_receptors, v_receptors, p=2.0)
+    
+    return dist_matrix.cpu().numpy()
+
+@torch.no_grad()
+def mean_receptor_distance(env, receptor_indices):
+    """Computes the exact average pairwise distance between distinct receptors."""
+    dist_matrix = receptor_distances(env, receptor_indices)
+    # Extract the upper triangle, excluding the diagonal (k=1)
+    upper_triangle = dist_matrix[np.triu_indices_from(dist_matrix, k=1)]
+    return float(upper_triangle.mean())
+
+@torch.no_grad()
+def marginal_entropy(activity, loss_fn):
+    """Computes the sum of marginal entropies for the receptor array."""
+    act = activity.detach()
+    if hasattr(loss_fn, '_compute_soft_histogram_entropy'):
+        return loss_fn._compute_soft_histogram_entropy(act).sum().item()
+    elif hasattr(loss_fn, 'compute_kde_marginal_entropies'):
+        return loss_fn.compute_kde_marginal_entropies(act).sum().item()
+    elif hasattr(loss_fn, '_compute_analytical_marginal_entropies'):
+        return loss_fn._compute_analytical_marginal_entropies(act).sum().item()
+    return 0.0
+
+@torch.no_grad()
+def full_array_entropy(activity, loss_fn):
+    """Computes the joint entropy of the full receptor array."""
+    act = activity.detach()
+    if hasattr(loss_fn, 'compute_soft_assignment'):
+        soft_assign = loss_fn.compute_soft_assignment(act)
+        joint_h = compute_discrete_joint_entropy(soft_assign)
+        return joint_h.item() if isinstance(joint_h, torch.Tensor) else joint_h
+    elif hasattr(loss_fn, 'compute_knn_joint_entropy'):
+        joint_h = loss_fn.compute_knn_joint_entropy(act, k=5)
+        return joint_h.item() if isinstance(joint_h, torch.Tensor) else joint_h
+    return 0.0
+
+@torch.no_grad()
+def total_correlation(activity, loss_fn):
+    """Computes the total correlation (redundancy) of the array."""
+    h_marginals = marginal_entropy(activity, loss_fn)
+    h_joint = full_array_entropy(activity, loss_fn)
+    return h_marginals - h_joint

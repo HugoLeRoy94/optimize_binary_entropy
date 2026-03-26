@@ -67,20 +67,6 @@ class BinaryProxyLoss(nn.Module):
             
         return total_loss
 
-    @torch.no_grad()
-    def make_stats(self, activity: torch.Tensor):
-        """
-        Returns logging metrics for the training loop.
-        """
-        marginals = self._compute_analytical_marginal_entropies(activity)
-        cov_penalty = self._compute_covariance_penalty(activity)
-        
-        return {
-            "marginal_entropy_sum": marginals.sum().item(), 
-            "marginal_entropy_mean": marginals.mean().item(),
-            "covariance_penalty": cov_penalty.item()
-        }
-
 def compute_discrete_joint_entropy(soft_assign: torch.Tensor) -> torch.Tensor:
     """
     Computes the joint entropy of a discrete system from soft assignments.
@@ -90,7 +76,7 @@ def compute_discrete_joint_entropy(soft_assign: torch.Tensor) -> torch.Tensor:
     B, R, K = soft_assign.shape
     
     # Dynamic switch based on computational complexity
-    if K ** R <= 1_000_000:
+    if K ** R <= 1024:
         # ------------------------------------------------------
         # METHOD A: Exact Enumeration (For small arrays)
         # ------------------------------------------------------
@@ -121,20 +107,22 @@ def compute_discrete_joint_entropy(soft_assign: torch.Tensor) -> torch.Tensor:
         # 2. Extract the log probabilities: P(A_r | ligand_i)
         log_probs = torch.log(soft_assign + 1e-12) # Shape: (B_x, R, K)
         
-        # 3. Vectorized Gathering (Calculate P(sampled_state | ligand) for all ligands)
-        # Expand dimensions so we can evaluate all B_a states against all B_x ligands
-        log_probs_exp = log_probs.unsqueeze(1).expand(B, B, R, K)
-        states_exp = sampled_states.unsqueeze(0).unsqueeze(-1).expand(B, B, R, 1)
+        # 3. Fast Matrix Multiplication to compute log P(state_j | ligand_i)
+        S_one_hot = torch.nn.functional.one_hot(sampled_states, num_classes=K).float()
+        log_probs_flat = log_probs.view(B, -1)
+        S_one_hot_flat = S_one_hot.view(B, -1)
         
-        # Gather the exact log probs for the sampled states
-        gathered_log_probs = torch.gather(log_probs_exp, 3, states_exp).squeeze(-1) # (B_x, B_a, R)
-        
-        # Sum over receptors to get log P(state_j | ligand_i)
-        log_p_a_given_x = gathered_log_probs.sum(dim=-1) # (B_x, B_a)
+        # Subsample states to prevent OOM on massive batches
+        M = min(B, 2048)
+        if M < B:
+            indices = torch.randperm(B, device=soft_assign.device)[:M]
+            S_one_hot_flat = S_one_hot_flat[indices]
+            
+        log_p_a_given_x = torch.matmul(log_probs_flat, S_one_hot_flat.T) # (B_x, M)
         
         # 4. Average across the batch of ligands to get the true P(state_j)
         p_a_given_x = torch.exp(log_p_a_given_x) # (B_x, B_a)
-        p_a = p_a_given_x.mean(dim=0) # (B_a,)
+        p_a = p_a_given_x.mean(dim=0) # (M,)
         
         # 5. Monte Carlo average: Expected value of [-log_K P(state)]
         p_a_safe = torch.clamp(p_a, min=1e-12)
@@ -169,31 +157,17 @@ class DiscreteExactLoss(nn.Module):
         joint_h = compute_discrete_joint_entropy(soft_assign)
         return -joint_h  # Maximize joint entropy
 
-    @torch.no_grad()
-    def make_stats(self, activity: torch.Tensor):
-        soft_assign = self.compute_soft_assignment(activity)
-        joint_h = compute_discrete_joint_entropy(soft_assign)
-        
-        p_marginal = soft_assign.mean(dim=0)
-        p_marginal = torch.clamp(p_marginal, min=1e-12)
-        marginal_h = -torch.sum(p_marginal * (torch.log(p_marginal) / math.log(self.n_bins)), dim=-1)
-        marginal_sum = marginal_h.sum()
-        
-        return {
-            "full_array_entropy": joint_h.item() if isinstance(joint_h, torch.Tensor) else joint_h,
-            "marginal_entropy": marginal_sum.item(),
-            "total_correlation": (marginal_sum - joint_h).item() if isinstance(joint_h, torch.Tensor) else marginal_sum.item() - joint_h
-        }
-
 class DiscreteProxyLoss(nn.Module):
     """
     Maximizes the discrete Shannon entropy using a Differentiable Soft Histogram.
-    Can handle an arbitrary number of bins (n_bins >= 2).
+    Uses an Activity Repulsion Penalty instead of Covariance, which naturally
+    promotes "thermometer codes" by forcing receptors to have distinct activation profiles
+    while maintaining blazing fast execution times.
     """
     def __init__(self, cov_weight: float = 1.0, n_bins: int = 2, bin_temp: float = 0.05):
         """
         Args:
-            cov_weight: Penalty weight for the covariance matrix.
+            cov_weight: Repulsion penalty weight (kept as cov_weight for backwards compatibility).
             n_bins: Number of discrete activation levels (2 = binary).
             bin_temp: Temperature for the soft binning. Lower = sharper, harder bins.
         """
@@ -261,55 +235,36 @@ class DiscreteProxyLoss(nn.Module):
         
         return entropy
 
-    def _compute_covariance_penalty(self, activity: torch.Tensor) -> torch.Tensor:
+    def _compute_repulsion_penalty(self, activity: torch.Tensor) -> torch.Tensor:
         """
-        Minimizes the off-diagonal terms of the linear covariance matrix.
-        We apply this to the raw continuous activity rather than the bins 
-        because it is vastly more computationally efficient and serves as a perfect proxy.
+        Penalizes receptors for having identical continuous activation profiles.
+        A perfectly shifted thermometer code has low overlap (low penalty),
+        while identical receptors have max overlap (high penalty).
         """
         B, R = activity.shape
-        mean = activity.mean(dim=0, keepdim=True)
-        centered = activity - mean
+        A = activity.T # (R, B)
         
-        cov_matrix = (centered.T @ centered) / (B - 1)
+        # Pairwise squared Euclidean distance: ||A_i - A_j||^2
+        A_sq = (A ** 2).sum(dim=1, keepdim=True) # (R, 1)
+        dist_matrix = (A_sq + A_sq.T - 2.0 * torch.matmul(A, A.T)) / B
+        
+        # Repulsion kernel: exp(-dist / tau)
+        tau = 0.05 
+        repulsion = torch.exp(-dist_matrix / tau)
+        
         mask = ~torch.eye(R, dtype=torch.bool, device=activity.device)
         
-        return (cov_matrix[mask] ** 2).sum()
+        return repulsion[mask].sum()
 
     def forward(self, activity: torch.Tensor):
         # 1. Compute Entropy using Differentiable Bins
         marginals = self._compute_soft_histogram_entropy(activity)
         loss_entropy = -marginals.mean() # Maximize entropy
         
-        # 2. Compute Covariance Penalty
-        loss_covariance = self._compute_covariance_penalty(activity)
+        # 2. Compute Repulsion Penalty instead of Covariance!
+        loss_repulsion = self._compute_repulsion_penalty(activity)
         
         # 3. Total Loss
-        total_loss = loss_entropy + (self.cov_weight * loss_covariance)
+        total_loss = loss_entropy + (self.cov_weight * loss_repulsion)
             
         return total_loss
-
-    @torch.no_grad()
-    def make_stats(self, activity: torch.Tensor):
-        # ==========================================================
-        # 1. Marginal Entropy (Exact)
-        # ==========================================================
-        marginals = self._compute_soft_histogram_entropy(activity)
-        marginal_sum = marginals.sum().item()
-        
-        # ==========================================================
-        # 2. Joint Entropy Calculation
-        # ==========================================================
-        # Re-calculate soft assignments to build the joint probabilities
-        soft_assign = self.compute_soft_assignment(activity) # Shape: (B, R, K)
-        
-        joint_h = compute_discrete_joint_entropy(soft_assign)
-        
-        # ==========================================================
-        # 3. Return Dictionary
-        # ==========================================================
-        return {
-            "full_array_entropy": joint_h.item() if isinstance(joint_h, torch.Tensor) else joint_h, 
-            "marginal_entropy": marginal_sum, 
-            "total_correlation": marginal_sum - (joint_h.item() if isinstance(joint_h, torch.Tensor) else joint_h)
-        }

@@ -40,7 +40,7 @@ def compute_discrete_joint_entropy(soft_assign: torch.Tensor) -> torch.Tensor:
     B, R, K = soft_assign.shape
     
     # Dynamic switch based on computational complexity
-    if K ** R <= 1_000_000:
+    if K ** R <= 1024:
         # ------------------------------------------------------
         # METHOD A: Exact Enumeration (For small arrays)
         # ------------------------------------------------------
@@ -71,20 +71,22 @@ def compute_discrete_joint_entropy(soft_assign: torch.Tensor) -> torch.Tensor:
         # 2. Extract the log probabilities: P(A_r | ligand_i)
         log_probs = torch.log(soft_assign + 1e-12) # Shape: (B_x, R, K)
         
-        # 3. Vectorized Gathering (Calculate P(sampled_state | ligand) for all ligands)
-        # Expand dimensions so we can evaluate all B_a states against all B_x ligands
-        log_probs_exp = log_probs.unsqueeze(1).expand(B, B, R, K)
-        states_exp = sampled_states.unsqueeze(0).unsqueeze(-1).expand(B, B, R, 1)
+        # 3. Fast Matrix Multiplication to compute log P(state_j | ligand_i)
+        S_one_hot = torch.nn.functional.one_hot(sampled_states, num_classes=K).float()
+        log_probs_flat = log_probs.view(B, -1)
+        S_one_hot_flat = S_one_hot.view(B, -1)
         
-        # Gather the exact log probs for the sampled states
-        gathered_log_probs = torch.gather(log_probs_exp, 3, states_exp).squeeze(-1) # (B_x, B_a, R)
-        
-        # Sum over receptors to get log P(state_j | ligand_i)
-        log_p_a_given_x = gathered_log_probs.sum(dim=-1) # (B_x, B_a)
+        # Subsample states to prevent OOM on massive batches
+        M = min(B, 2048)
+        if M < B:
+            indices = torch.randperm(B, device=soft_assign.device)[:M]
+            S_one_hot_flat = S_one_hot_flat[indices]
+            
+        log_p_a_given_x = torch.matmul(log_probs_flat, S_one_hot_flat.T) # (B_x, M)
         
         # 4. Average across the batch of ligands to get the true P(state_j)
         p_a_given_x = torch.exp(log_p_a_given_x) # (B_x, B_a)
-        p_a = p_a_given_x.mean(dim=0) # (B_a,)
+        p_a = p_a_given_x.mean(dim=0) # (M,)
         
         # 5. Monte Carlo average: Expected value of [-log_K P(state)]
         p_a_safe = torch.clamp(p_a, min=1e-12)
@@ -264,28 +266,3 @@ class TolerantDiscreteProxyLoss(nn.Module):
         total_loss = loss_entropy + (self.cov_weight * loss_covariance)
             
         return total_loss
-
-    @torch.no_grad()
-    def make_stats(self, activity: torch.Tensor):
-        # ==========================================================
-        # 1. Marginal Entropy (Exact)
-        # ==========================================================
-        marginals = self._compute_soft_histogram_entropy(activity)
-        marginal_sum = marginals.sum().item()
-        
-        # ==========================================================
-        # 2. Joint Entropy Calculation
-        # ==========================================================
-        # Re-calculate soft assignments to build the joint probabilities
-        soft_assign = self.compute_soft_assignment(activity) # Shape: (B, R, K)
-        
-        joint_h = compute_discrete_joint_entropy(soft_assign)
-        
-        # ==========================================================
-        # 3. Return Dictionary
-        # ==========================================================
-        return {
-            "full_array_entropy": joint_h.item() if isinstance(joint_h, torch.Tensor) else joint_h, 
-            "marginal_entropy": marginal_sum, 
-            "total_correlation": marginal_sum - (joint_h.item() if isinstance(joint_h, torch.Tensor) else joint_h)
-        }
