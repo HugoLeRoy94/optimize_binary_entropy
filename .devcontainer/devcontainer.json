@@ -12,7 +12,12 @@
         }
     },
     "remoteUser": "root",
-    "updateRemoteUserUID": true,
+    "updateRemoteUserUID": false,
     "containerUser": "root",
-    "postCreateCommand": "chown -R $(id -u):$(id -g) /app/unit_test /app/data /app/run"
+    "containerEnv": {
+        "http_proxy": "${localEnv:http_proxy}",
+        "https_proxy": "${localEnv:https_proxy}",
+        "no_proxy": "${localEnv:no_proxy}"
+    },
+    "postCreateCommand": "chown -R root:root /app/unit_test /app/data /app/run"
 }
