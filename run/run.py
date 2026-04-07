@@ -87,6 +87,10 @@ def train(CONF:dict,
 #    if measurement_fns is None:
 #        measurement_fns = [full_array_entropy, marginal_entropy, total_correlation]
 
+    scheduler = None
+    if CONF.get('use_scheduler', False):
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=CONF['epochs'], eta_min=1e-5)
+
     stats = []
     for epoch in range(CONF['epochs']):
         optimizer.zero_grad()
@@ -105,6 +109,9 @@ def train(CONF:dict,
         
         loss.backward()
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
+            
         if epoch % (CONF['epochs']//100) == 0:
             with torch.no_grad():
                 # 1. Generate a massive evaluation batch
@@ -133,6 +140,7 @@ def train(CONF:dict,
                     else:
                         name = getattr(fn, '__name__', str(fn))
                         stat[name] = result
+                stat['lr'] = optimizer.param_groups[0]['lr']
                 
                 stats.append(stat)
     stats = {key:[stats[i][key] for i in range(stats.__len__())] for key in stats[0].keys()}

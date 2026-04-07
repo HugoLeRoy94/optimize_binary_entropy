@@ -2,71 +2,6 @@ import torch
 import torch.nn as nn
 import math
 
-class BinaryProxyLoss(nn.Module):
-    """
-    Maximizes the exact analytical discrete Shannon entropy of the marginals
-    while minimizing the linear covariance between different receptors.
-    
-    Expects `activity` to be probabilities (bounded between 0 and 1), 
-    such as the output of a Sigmoid function.
-    """
-    def __init__(self, cov_weight: float = 1.0):
-        super().__init__()
-        self.cov_weight = cov_weight
-
-    def _compute_analytical_marginal_entropies(self, activity: torch.Tensor) -> torch.Tensor:
-        """
-        Computes the exact discrete Shannon entropy for each receptor.
-        activity shape: (Batch, R) - representing probability of firing.
-        Returns shape: (R,) - entropy in bits.
-        """
-        # 1. The Marginal Probability of firing is just the mean over the batch
-        # p_r shape: (R,)
-        p_r = activity.mean(dim=0)
-        
-        # 2. Clamp to avoid log2(0)
-        p_r = torch.clamp(p_r, min=1e-12, max=1.0 - 1e-12)
-        
-        # 3. Analytical Shannon Entropy: -p*log2(p) - (1-p)*log2(1-p)
-        entropy = -p_r * torch.log2(p_r) - (1.0 - p_r) * torch.log2(1.0 - p_r)
-        
-        return entropy
-
-    def _compute_covariance_penalty(self, activity: torch.Tensor) -> torch.Tensor:
-        """
-        Minimizes the off-diagonal terms of the covariance matrix 
-        to encourage independent receptors.
-        """
-        B, R = activity.shape
-        
-        # Center the probabilities
-        mean = activity.mean(dim=0, keepdim=True)
-        centered = activity - mean
-        
-        # Compute Covariance Matrix: (R, B) @ (B, R) -> (R, R)
-        cov_matrix = (centered.T @ centered) / (B - 1)
-        
-        # Create a mask to ignore the diagonal (variance)
-        mask = ~torch.eye(R, dtype=torch.bool, device=activity.device)
-        
-        # Sum of squared off-diagonal elements
-        return (cov_matrix[mask] ** 2).sum()
-
-    def forward(self, activity: torch.Tensor):
-        # 1. Compute Exact Marginal Entropies
-        marginals = self._compute_analytical_marginal_entropies(activity)
-        
-        # We want to MAXIMIZE entropy, so we minimize the negative mean
-        loss_entropy = -marginals.mean()
-        
-        # 2. Compute Covariance Penalty (we want to MINIMIZE this)
-        loss_covariance = self._compute_covariance_penalty(activity)
-        
-        # 3. Total Loss
-        total_loss = loss_entropy + (self.cov_weight * loss_covariance)
-            
-        return total_loss
-
 def compute_discrete_joint_entropy(soft_assign: torch.Tensor) -> torch.Tensor:
     """
     Computes the joint entropy of a discrete system from soft assignments.
@@ -159,22 +94,27 @@ class DiscreteExactLoss(nn.Module):
 
 class DiscreteProxyLoss(nn.Module):
     """
-    Maximizes the discrete Shannon entropy using a Differentiable Soft Histogram.
-    Uses an Activity Repulsion Penalty instead of Covariance, which naturally
-    promotes "thermometer codes" by forcing receptors to have distinct activation profiles
-    while maintaining blazing fast execution times.
+    Maximizes the discrete Shannon entropy of the marginals using a Differentiable Soft Histogram,
+    while minimizing a penalty term to encourage receptor independence or diversity.
     """
-    def __init__(self, cov_weight: float = 1.0, n_bins: int = 2, bin_temp: float = 0.05):
+    def __init__(self, cov_weight: float = 1.0, n_bins: int = 2, bin_temp: float = 0.05, penalty_type: str = 'repulsion'):
         """
         Args:
-            cov_weight: Repulsion penalty weight (kept as cov_weight for backwards compatibility).
+            cov_weight: Weight for the penalty term.
             n_bins: Number of discrete activation levels (2 = binary).
             bin_temp: Temperature for the soft binning. Lower = sharper, harder bins.
+            penalty_type: The type of penalty to apply. Can be 'repulsion' (penalizes
+                          similar activation profiles) or 'covariance' (penalizes linear
+                          correlation). Defaults to 'repulsion'.
         """
         super().__init__()
         self.cov_weight = cov_weight
         self.n_bins = n_bins
         self.bin_temp = bin_temp
+        self.penalty_type = penalty_type
+
+        if self.penalty_type not in ['repulsion', 'covariance']:
+            raise ValueError("penalty_type must be 'repulsion' or 'covariance'")
         
         # Define the centers of the bins, evenly spaced between 0.0 and 1.0
         # Register as a buffer so it moves to the GPU automatically
@@ -256,15 +196,38 @@ class DiscreteProxyLoss(nn.Module):
         
         return repulsion[mask].sum()
 
+    def _compute_covariance_penalty(self, activity: torch.Tensor) -> torch.Tensor:
+        """
+        Minimizes the off-diagonal terms of the covariance matrix 
+        to encourage independent receptors.
+        """
+        B, R = activity.shape
+        
+        # Center the probabilities
+        mean = activity.mean(dim=0, keepdim=True)
+        centered = activity - mean
+        
+        # Compute Covariance Matrix: (R, B) @ (B, R) -> (R, R)
+        cov_matrix = (centered.T @ centered) / (B - 1)
+        
+        # Create a mask to ignore the diagonal (variance)
+        mask = ~torch.eye(R, dtype=torch.bool, device=activity.device)
+        
+        # Sum of squared off-diagonal elements
+        return (cov_matrix[mask] ** 2).sum()
+
     def forward(self, activity: torch.Tensor):
         # 1. Compute Entropy using Differentiable Bins
         marginals = self._compute_soft_histogram_entropy(activity)
         loss_entropy = -marginals.mean() # Maximize entropy
         
-        # 2. Compute Repulsion Penalty instead of Covariance!
-        loss_repulsion = self._compute_repulsion_penalty(activity)
+        # 2. Compute selected penalty
+        if self.penalty_type == 'repulsion':
+            penalty = self._compute_repulsion_penalty(activity)
+        else: # covariance
+            penalty = self._compute_covariance_penalty(activity)
         
         # 3. Total Loss
-        total_loss = loss_entropy + (self.cov_weight * loss_repulsion)
+        total_loss = loss_entropy + (self.cov_weight * penalty)
             
         return total_loss
