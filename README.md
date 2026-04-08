@@ -72,3 +72,61 @@
     ```bash
     devpod ide set-options codium -o COMMAND=$(which codium)
     ```
+
+# Run a simple Python Script
+```
+docker exec -it optimize_binary python3 your_script.py
+```
+
+-it is just to keep it interactive
+
+# 🚀 GPU Cluster Survival Guide (e4-seminara)
+
+This guide summarizes the final working configuration for running code on the University A100 GPUs using **Docker** while bypassing the broken system Python and complex SSH tunnels.
+
+---
+
+## 1. The Setup Architecture
+We are using **Rootless Docker** to manage dependencies and GPU access without needing `sudo` permissions.
+
+* **Host Server:** `leroy@10.187.172.7`
+* **Container Name:** `optimize_binary`
+* **GPU Hardware:** 4x NVIDIA A100
+* **Mapping:** Your local folder `/home/leroy/optimize_binary_entropy` is mirrored inside the container at `/app`.
+
+---
+
+## 2. How to Work (The Workflow)
+To avoid the "SSH Inception" and connection errors, we use VSCodium to edit files on the host and the terminal to execute them in the container.
+
+### Step 1: Connect to the Server
+1. Open **VSCodium** on your laptop.
+2. Use the **Remote - SSH** extension to connect to `leroy@10.187.172.7`.
+3. Open your project folder: `/home/leroy/optimize_binary_entropy`.
+4. **Edit your code here.** Saving a file here automatically updates it inside the Docker container.
+
+### Step 2: Run Your Code (The Docker "Bridge")
+Do not run `python` directly in the VSCodium terminal. Instead, "inject" your commands into the running Docker container using `docker exec`.
+
+* **To check GPU availability:**
+    ```bash
+    docker exec -it optimize_binary nvidia-smi
+    ```
+* **To run a Python script:**
+    ```bash
+    docker exec -it optimize_binary python3 your_script.py
+    ```
+* **To get an interactive shell inside the GPU environment:**
+    ```bash
+    docker exec -it optimize_binary bash
+    ```
+
+---
+
+## 3. Important Configurations
+
+### University Proxy (Inside the Container)
+If your code needs to download data or packages, run these exports inside the container terminal:
+```bash
+export http_proxy=[http://proxy.unige.it:8080/](http://proxy.unige.it:8080/)
+export https_proxy=[http://proxy.unige.it:8080/](http://proxy.unige.it:8080/)

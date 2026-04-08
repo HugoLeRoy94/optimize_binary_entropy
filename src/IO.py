@@ -12,6 +12,17 @@ from src.environment import LigandEnvironment, LogNormalConcentration
 from src.physics import MWCReceptor,BinaryReceptor
 from objectives.loss import ExactInformationLoss
 
+class CustomJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder to seamlessly handle PyTorch tensors and NumPy types."""
+    def default(self, obj):
+        if isinstance(obj, torch.Tensor):
+            return obj.cpu().tolist()
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        return super().default(obj)
+
 # ==========================================
 # 1. MOTHER CLASS (Path Management)
 # ==========================================
@@ -44,7 +55,7 @@ class ExperimentLogger(BaseIO):
     def save_config(self, config_dict):
         """Saves the CONF dictionary as a human-readable JSON."""
         with open(self.config_path, 'w') as f:
-            json.dump(config_dict, f, indent=4)
+            json.dump(config_dict, f, indent=4, cls=CustomJSONEncoder)
 
     def save_stats(self, epoch, stats):
         """Appends a single epoch's stats to a CSV file."""
@@ -107,14 +118,14 @@ class ExperimentLoader(BaseIO):
         """Returns the CSV stats as a Pandas DataFrame."""
         return pd.read_csv(self.stats_path)
 
-    def load_run(self, filename="best_model.pt"):
+    def load_run(self, filename="best_model.pt", map_location="cpu"):
         """Utility to load a raw checkpoint dictionary."""
-        return torch.load(os.path.join(self.run_dir, filename))
+        return torch.load(os.path.join(self.run_dir, filename), map_location=map_location)
 
-    def load_all_checkpoints(self):
+    def load_all_checkpoints(self, map_location="cpu"):
         """Returns a chronological list of all saved checkpoint dictionaries."""
         files = sorted([f for f in os.listdir(self.ckpt_dir) if f.endswith('.pt')])
-        return [torch.load(os.path.join(self.ckpt_dir, f)) for f in files]
+        return [torch.load(os.path.join(self.ckpt_dir, f), map_location=map_location) for f in files]
     
     def load_objects(self, filename="best_model.pt", device='cpu'):
         """Reconstructs fully functional PyTorch objects from the saved files."""
@@ -125,12 +136,12 @@ class ExperimentLoader(BaseIO):
         stats_df = self.load_history()
         
         # 2. Load the weights
-        ckpt = self.load_run(filename)
+        ckpt = self.load_run(filename, map_location=device)
         
         # 3. Rebuild empty objects based on config
         strat = LogNormalConcentration(n_families=c['n_families'], init_mean=5.0)
         e = LigandEnvironment(c['n_units'], c['n_families'], conc_model=strat)
-        p = Receptor(c['n_units'], c['k_sub'])
+        p = BinaryReceptor(c['n_units'], c['k_sub'])
         l = ExactInformationLoss(k_knn=c.get('k_knn', 5)) # Use .get() for safety
         
         # 4. Inject states
